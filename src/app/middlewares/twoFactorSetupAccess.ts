@@ -17,7 +17,10 @@ const twoFactorSetupAccess = async (
   try {
     const header = req.headers.authorization;
     if (!header || !header.startsWith("Bearer ")) {
-      throw new ApiError(httpStatus.UNAUTHORIZED, "Invalid authorization format!");
+      throw new ApiError(
+        httpStatus.UNAUTHORIZED,
+        "Invalid authorization format!",
+      );
     }
     const token = header.split(" ")[1];
 
