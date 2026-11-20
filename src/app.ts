@@ -9,6 +9,7 @@ import helmet from "helmet";
 import compression from "compression";
 import { rateLimit } from "express-rate-limit";
 import { WebhookRoute } from "./app/modules/webhooks/webhook.route";
+import { PublicInquiryRoute } from "./app/modules/publicinquiry/publicinquiry.route";
 
 const app: Application = express();
 
@@ -48,6 +49,9 @@ const authLimiter = rateLimit({
 //   })
 // );
 
+// Public website form: no login, its own CORS, limits and parsers (before the global ones)
+app.use("/api/v1/public", PublicInquiryRoute);
+
 // Browsers allowed to call the API (and to open the live notification socket)
 export const allowedOrigins = [
   "https://www.betonherstel-business-portal.vercel.app",
@@ -80,10 +84,81 @@ app.use(
 );
 console.log(path.join(__dirname, "..", "public", "uploads"));
 
+// Simple status page for browsers; API clients that ask for JSON still get the old message
+const statusPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Betonherstel Server</title>
+  <style>
+    :root { --bg: #f4f5f7; --card: #ffffff; --text: #1f2933; --muted: #6b7785; --accent: #e8590c; --ok: #2f9e44; --line: #e4e7eb; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #14171a; --card: #1e2227; --text: #eceff1; --muted: #9aa5b1; --line: #2c3238; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .card { width: 100%; max-width: 420px; padding: 40px 32px; text-align: center; background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06); }
+    .logo { width: 56px; height: 56px; margin: 0 auto 20px; display: grid; place-items: center; border-radius: 14px; background: var(--accent); color: #fff; font-size: 28px; font-weight: 700; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { margin: 0; color: var(--muted); font-size: 15px; }
+    .status { display: inline-flex; align-items: center; gap: 8px; margin-top: 24px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); font-size: 14px; font-weight: 500; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(47, 158, 68, 0.6); animation: pulse 2s infinite; }
+    @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(47, 158, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(47, 158, 68, 0); } }
+    button { display: block; margin: 20px auto 0; padding: 10px 22px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+    button:hover { opacity: 0.88; }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    #result { min-height: 20px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+    footer { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="logo">B</div>
+    <h1>Betonherstel Server</h1>
+    <p>The API is up and ready to receive requests.</p>
+    <div class="status"><span class="dot"></span>Running</div>
+    <button id="wake" type="button">Wake up server</button>
+    <div id="result" aria-live="polite"></div>
+    <footer>Betonherstel CRM &middot; API v1</footer>
+  </main>
+  <script>
+    var btn = document.getElementById("wake");
+    var out = document.getElementById("result");
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      btn.textContent = "Waking up...";
+      out.textContent = "";
+      var started = Date.now();
+      // A sleeping host can need a minute to start, so wait for it
+      var controller = new AbortController();
+      var timer = setTimeout(function () { controller.abort(); }, 90000);
+      fetch("/", { headers: { Accept: "application/json" }, cache: "no-store", signal: controller.signal })
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          out.textContent = "Server is awake (" + (Date.now() - started) + " ms)";
+        })
+        .catch(function () {
+          out.textContent = "Could not reach the server. Please try again.";
+        })
+        .finally(function () {
+          clearTimeout(timer);
+          btn.disabled = false;
+          btn.textContent = "Wake up server";
+        });
+    });
+  </script>
+</body>
+</html>`;
+
 app.get("/", (req: Request, res: Response) => {
-  res.send({
-    Message: "The betonherstel server is running. . .",
-  });
+  if (req.accepts(["html", "json"]) === "json") {
+    res.send({
+      Message: "The betonherstel server is running. . .",
+    });
+    return;
+  }
+  res.type("html").send(statusPage);
 });
 
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
