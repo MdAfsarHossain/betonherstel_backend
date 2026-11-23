@@ -6,6 +6,36 @@ import handleZodError from "./handleZodError";
 import { IGenericErrorMessage } from "../interface/error";
 import ApiError from "./ApiError";
 
+const isProduction = () => config.env === "production";
+
+// Database errors that mean "the request was wrong", by SQLSTATE
+const postgresClientErrors: Record<string, { status: number; message: string }> = {
+  "23505": { status: httpStatus.CONFLICT, message: "This value already exists!" },
+  "23503": { status: httpStatus.CONFLICT, message: "This record is linked to other data, or refers to something that does not exist!" },
+  "23502": { status: httpStatus.BAD_REQUEST, message: "A required value is missing!" },
+  "23514": { status: httpStatus.BAD_REQUEST, message: "A value is not allowed!" },
+  "22P02": { status: httpStatus.BAD_REQUEST, message: "A value has the wrong format!" },
+  "22001": { status: httpStatus.BAD_REQUEST, message: "A value is too long!" },
+  "22003": { status: httpStatus.BAD_REQUEST, message: "A number is out of range!" },
+  "22007": { status: httpStatus.BAD_REQUEST, message: "A date or time has the wrong format!" },
+  "22008": { status: httpStatus.BAD_REQUEST, message: "A date or time is out of range!" },
+  "22021": { status: httpStatus.BAD_REQUEST, message: "A value contains characters that are not allowed!" },
+  "22P05": { status: httpStatus.BAD_REQUEST, message: "A value contains characters that are not allowed!" },
+};
+
+// Connection-level database failures (restart, network, pool exhausted), not mistakes in the request
+const isDatabaseUnavailable = (error: any) =>
+  ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EAI_AGAIN"].includes(error?.code) ||
+  ["57P01", "57P02", "57P03", "53300", "08000", "08001", "08003", "08004", "08006"].includes(error?.code) ||
+  /Connection terminated|timeout exceeded when trying to connect|Client has encountered a connection error|Connection error/i.test(String(error?.message ?? ""));
+
+const snelstartStatus: Record<string, number> = {
+  NOT_CONFIGURED: httpStatus.CONFLICT,
+  VALIDATION: httpStatus.BAD_REQUEST,
+  TEMPORARY: httpStatus.SERVICE_UNAVAILABLE,
+  RATE_LIMIT: httpStatus.SERVICE_UNAVAILABLE,
+};
+
 const GlobalErrorHandler = (
   error: any,
   req: Request,
@@ -78,6 +108,55 @@ const GlobalErrorHandler = (
     errorMessages = [{ path: "", message }];
   }
 
+  // Errors from body-parser and other http-errors (malformed JSON, unsupported charset, ...): the
+  // client's mistake with its own 4xx status, not a crash
+  else if (
+    typeof (error?.status ?? error?.statusCode) === "number" &&
+    (error.status ?? error.statusCode) >= 400 &&
+    (error.status ?? error.statusCode) < 500 &&
+    error.expose !== false &&
+    !(typeof error?.code === "string" && /^[0-9A-Z]{5}$/.test(error.code))
+  ) {
+    statusCode = error.status ?? error.statusCode;
+    message =
+      error.type === "entity.parse.failed"
+        ? "The request body is not valid JSON!"
+        : statusCode === httpStatus.REQUEST_ENTITY_TOO_LARGE
+          ? "The request is too large!"
+          : error.message;
+    errorMessages = [{ path: "", message }];
+  }
+
+  // A broken multipart upload (busboy: malformed part header, unexpected end of form, ...): the client's mistake
+  else if (error instanceof Error && /busboy|multer/.test(String(error.stack ?? "").split("\n").slice(0, 6).join("\n"))) {
+    statusCode = httpStatus.BAD_REQUEST;
+    message = "The upload is not a valid form!";
+    errorMessages = [{ path: "", message }];
+  }
+
+  // The database (or its connection) is unavailable: tell clients and load balancers to retry later (503)
+  else if (isDatabaseUnavailable(error)) {
+    statusCode = httpStatus.SERVICE_UNAVAILABLE;
+    message = "The service is temporarily unavailable. Please try again in a moment!";
+    errorMessages = [{ path: "", message }];
+  }
+
+  // PostgreSQL constraint and type errors caused by the request: a 4xx with a generic message, never
+  // the database's own text (table, column and row details)
+  else if (typeof error?.code === "string" && postgresClientErrors[error.code]) {
+    const mapped = postgresClientErrors[error.code];
+    statusCode = mapped.status;
+    message = mapped.message;
+    errorMessages = [{ path: "", message }];
+  }
+
+  // SnelStart integration errors: "not connected" and bad mapping are the admin's to fix, not a crash
+  else if (error?.constructor?.name === "SnelStartError" && snelstartStatus[error.kind]) {
+    statusCode = snelstartStatus[error.kind];
+    message = error.message;
+    errorMessages = [{ path: "", message }];
+  }
+
   // Handle Errors
   else if (error instanceof Error) {
     message = error?.message;
@@ -131,12 +210,22 @@ const GlobalErrorHandler = (
     ];
   }
 
+  // A crash must not tell the client about the database, file paths or code: log it here, answer generically
+  if (statusCode >= 500 && !(error instanceof ApiError)) {
+    console.error("❌ Unhandled error on", req.method, req.originalUrl, error);
+    if (isProduction()) {
+      message = "Something went wrong!";
+      errorMessages = [{ path: "", message }];
+    }
+  }
+
   res.status(statusCode).json({
     success: false,
     message,
     errorMessages,
-    err: error,
-    stack: config.env !== "production" ? error?.stack : undefined,
+    // The raw error object (SQL details, stack) is for development only
+    err: isProduction() ? { statusCode } : error,
+    stack: !isProduction() ? error?.stack : undefined,
   });
 };
 
