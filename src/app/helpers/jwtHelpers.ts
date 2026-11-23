@@ -13,7 +13,8 @@ const generateToken = (
 };
 
 const verifyToken = (token: string, secret: Secret) => {
-  return jwt.verify(token, secret) as JwtPayload;
+  // Only HS256 is accepted: never the algorithm the token's own header asks for
+  return jwt.verify(token, secret, { algorithms: ["HS256"] }) as JwtPayload;
 };
 
 export const jwtHelpers = {
