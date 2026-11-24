@@ -7,6 +7,7 @@ import ApiError from "../../errors/ApiError";
 import assertUserActive from "../../helpers/assertUserActive";
 import { jwtHelpers } from "../../helpers/jwtHelpers";
 import { requiresTwoFactor } from "../../helpers/twoFactorPolicy";
+import { invalidateAuthCache } from "../../middlewares/auth";
 import { transaction, query } from "../../utils/db";
 import { sendTemplatedEmail } from "../../utils/email/emailService";
 import { toLanguage } from "../../utils/i18n";
@@ -24,7 +25,7 @@ const hashToken = (token: string) =>
 
 // Compared against when the email is unknown, so a wrong email and a wrong
 // password take the same time and give the same answer.
-const dummyHash = bcrypt.hashSync("not-a-real-password", 10);
+const dummyHash = bcrypt.hashSync("not-a-real-password", Number(config.bcrypt_salt_rounds) || 12);
 
 // Login User
 const loginUserFromDB = async (
@@ -101,6 +102,15 @@ const refreshToken = async (token: string) => {
 
   assertUserActive(user);
 
+  // A refresh token from before the last password change or reset no longer works
+  if (
+    user.password_changed_at &&
+    typeof payload.iat === "number" &&
+    payload.iat < Math.floor(new Date(user.password_changed_at).getTime() / 1000)
+  ) {
+    throw new ApiError(httpStatus.UNAUTHORIZED, "Your password was changed. Please sign in again!");
+  }
+
   if (requiresTwoFactor(user.role) && !user.two_factor_enabled) {
     throw new ApiError(
       httpStatus.FORBIDDEN,
@@ -129,47 +139,53 @@ const forgotPassword = async (payload: { email: string }) => {
     return { message };
   }
 
-  // At most one link per minute per account (stops email flooding)
-  const recent = await query(
-    `SELECT 1 FROM password_reset_tokens
-     WHERE user_id = $1::uuid AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'`,
-    [user.id],
-  );
-  if (recent.rows.length > 0) {
-    return { message };
-  }
+  // The token and the email are handled after the answer is given, so the response time is the
+  // same for an account that exists and one that does not (the email server can take seconds)
+  void (async () => {
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresMinutes = config.password_reset_expires_minutes;
 
-  const token = crypto.randomBytes(32).toString("hex");
-  const expiresMinutes = config.password_reset_expires_minutes;
+    // At most one link per minute per account (stops email flooding). The check and the new link
+    // are one step behind a per-account lock, so parallel requests cannot all pass the check.
+    const created = await transaction(async (client) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`pwreset:${user.id}`]);
+      const recent = await client.query(
+        `SELECT 1 FROM password_reset_tokens
+         WHERE user_id = $1::uuid AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'`,
+        [user.id],
+      );
+      if (recent.rows.length > 0) return false;
 
-  // Only the hash is stored; a newer link replaces any older ones
-  await transaction(async (client) => {
-    await client.query(
-      `DELETE FROM password_reset_tokens WHERE user_id = $1::uuid`,
-      [user.id],
-    );
-    await client.query(
-      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
-       VALUES ($1::uuid, $2, CURRENT_TIMESTAMP + ($3 || ' minutes')::interval)`,
-      [user.id, hashToken(token), String(expiresMinutes)],
-    );
-  });
-
-  try {
-    await sendTemplatedEmail({
-      to: user.email,
-      templateKey: "password_reset",
-      language: toLanguage(user.preferred_language),
-      variables: {
-        name: user.name,
-        link: `${config.frontend_url}/reset-password?token=${token}`,
-        expires_minutes: expiresMinutes,
-      },
-      related: { type: "user", id: user.id },
+      // Only the hash is stored; a newer link replaces any older ones
+      await client.query(
+        `DELETE FROM password_reset_tokens WHERE user_id = $1::uuid`,
+        [user.id],
+      );
+      await client.query(
+        `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+         VALUES ($1::uuid, $2, CURRENT_TIMESTAMP + ($3 || ' minutes')::interval)`,
+        [user.id, hashToken(token), String(expiresMinutes)],
+      );
+      return true;
     });
-  } catch (error) {
-    // Already logged by the email service; do not reveal the failure to the caller
-  }
+    if (!created) return;
+
+    try {
+      await sendTemplatedEmail({
+        to: user.email,
+        templateKey: "password_reset",
+        language: toLanguage(user.preferred_language),
+        variables: {
+          name: user.name,
+          link: `${config.frontend_url}/reset-password?token=${token}`,
+          expires_minutes: expiresMinutes,
+        },
+        related: { type: "user", id: user.id },
+      });
+    } catch (error) {
+      // Already logged by the email service; do not reveal the failure to the caller
+    }
+  })().catch((error) => console.error("❌ Password reset link failed:", error?.message ?? error));
 
   return { message };
 };
@@ -181,6 +197,7 @@ const resetPassword = async (token: string, newPassword: string) => {
     Number(config.bcrypt_salt_rounds) || 12,
   );
 
+  let resetUserId = "";
   await transaction(async (client) => {
     // Marking it used and checking it is one atomic statement
     const used = await client.query(
@@ -198,9 +215,10 @@ const resetPassword = async (token: string, newPassword: string) => {
       );
     }
     const userId = used.rows[0].user_id;
+    resetUserId = userId;
 
     await client.query(
-      `UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid`,
+      `UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid`,
       [hashedPassword, userId],
     );
     await client.query(
@@ -208,6 +226,9 @@ const resetPassword = async (token: string, newPassword: string) => {
       [userId],
     );
   });
+
+  // Sessions from before the reset stop working at once
+  invalidateAuthCache(resetUserId);
 
   return {
     message: "Please login with your new password",
@@ -258,9 +279,11 @@ const changePassword = async (
   );
 
   await query(
-    `UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid`,
+    `UPDATE users SET password = $1, password_changed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $2::uuid`,
     [hashedPassword, userId],
   );
+  // Other sessions (and this one) must sign in again with the new password
+  invalidateAuthCache(userId);
 
   return {
     message: "Password updated successfully",
