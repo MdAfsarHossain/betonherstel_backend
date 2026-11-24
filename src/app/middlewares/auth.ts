@@ -56,6 +56,10 @@ const createAuth =
         }
 
         const { id } = verifiedUser;
+        // A signed token with a malformed id must be a plain 401, not a database error
+        if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+          throw new ApiError(httpStatus.UNAUTHORIZED, "You are not authorized!");
+        }
 
         // Get user from database
         let user = userCache.get(id);
@@ -73,6 +77,7 @@ const createAuth =
                     is_email_verified,
                     is_verified,
                     two_factor_enabled,
+                    password_changed_at,
                     created_at as created_at
                 FROM users 
                 WHERE id = $1::uuid
@@ -91,19 +96,28 @@ const createAuth =
         // Check user status
         assertUserActive(user);
 
+        // A token issued before the last password change or reset is no longer valid
+        if (
+          user.password_changed_at &&
+          typeof verifiedUser.iat === "number" &&
+          verifiedUser.iat < Math.floor(new Date(user.password_changed_at).getTime() / 1000)
+        ) {
+          throw new ApiError(httpStatus.UNAUTHORIZED, "Your password was changed. Please sign in again!");
+        }
+
         // Admins must have two-factor authentication set up (FR-AUTH-04). Tokens are
         // only issued after the second factor, so this also catches tokens issued
         // before the requirement existed.
-        // if (
-        //   options.enforceTwoFactor &&
-        //   requiresTwoFactor(user.role) &&
-        //   !user.two_factor_enabled
-        // ) {
-        //   throw new ApiError(
-        //     httpStatus.FORBIDDEN,
-        //     "Two-factor authentication setup is required for your role!",
-        //   );
-        // }
+        if (
+          options.enforceTwoFactor &&
+          requiresTwoFactor(user.role) &&
+          !user.two_factor_enabled
+        ) {
+          throw new ApiError(
+            httpStatus.FORBIDDEN,
+            "Two-factor authentication setup is required for your role!",
+          );
+        }
 
         // Attach user to request
         // Database values win over the token's claims: a role or status changed
