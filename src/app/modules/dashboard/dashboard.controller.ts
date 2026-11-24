@@ -5,7 +5,7 @@ import sendResponse from "../../helpers/sendResponse";
 import { DashboardService } from "./dashboard.service";
 
 const getDashboard = catchAsync(async (req: Request, res: Response) => {
-  const result = await DashboardService.getDashboard({ id: req.user.id, role: req.user.role });
+  const result = await DashboardService.getDashboard({ id: req.user.id, role: req.user.role }, req.query);
   sendResponse(res, { statusCode: httpStatus.OK, success: true, message: "Dashboard fetched successfully", data: result });
 });
 
