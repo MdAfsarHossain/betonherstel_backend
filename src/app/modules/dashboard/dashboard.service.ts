@@ -22,7 +22,8 @@ export interface IDashActor {
 }
 
 const todaySql = `(CURRENT_TIMESTAMP AT TIME ZONE 'Europe/Amsterdam')::date`;
-const isAdmin = (actor: IDashActor) => ["SUPERADMIN", "ADMIN"].includes(actor.role);
+const isAdmin = (actor: IDashActor) =>
+  ["SUPERADMIN", "ADMIN"].includes(actor.role);
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
 // The events the feed shows by default (FR-DASH-04); `scope=all` shows every event
@@ -47,7 +48,15 @@ const categoryOf = (eventType: string) => {
 // ---------------------------------------------------------------------------
 
 const getTiles = async (actor: IDashActor) => {
-  const [actions, notifications, workOrders, inquiries, quotes, projects, subscriptions] = await Promise.all([
+  const [
+    actions,
+    notifications,
+    workOrders,
+    inquiries,
+    quotes,
+    projects,
+    subscriptions,
+  ] = await Promise.all([
     ActionService.getSummary(actor),
     NotificationService.getSummary(actor.id),
     query(
@@ -89,7 +98,11 @@ const getTiles = async (actor: IDashActor) => {
 
   return {
     actions: { ...actions.mine, team: actions.team ?? null, link: "/actions" },
-    messages: { unread_messages: notifications.unread_messages, unread_notifications: notifications.unread_notifications, link: "/messages" },
+    messages: {
+      unread_messages: notifications.unread_messages,
+      unread_notifications: notifications.unread_notifications,
+      link: "/messages",
+    },
     work_orders: { ...workOrders.rows[0], link: "/work-orders" },
     inquiries: { ...inquiries.rows[0], link: "/inquiries" },
     quotes: { ...quotes.rows[0], link: "/quotes" },
@@ -108,20 +121,28 @@ const getTiles = async (actor: IDashActor) => {
 // New website (and other) inquiries stay at the top until someone opens them (FR-DASH-02):
 // they are the unread NEW_INQUIRY notifications of this user
 const getHighlightedInquiries = async (userId: string) => {
+  // New inquiries that nobody has opened yet: `first_opened_at` is set the first time anyone opens one
+  // (GET /inquiries/:id), so it disappears for everyone as soon as one colleague has looked at it
   const result = await query(
     `
-      SELECT n.id AS notification_id, n.title, n.body, n.created_at AS "createdAt",
-             n.entity_id AS inquiry_id, i.reference, i.source::text AS source, i.contact_name,
-             s.key AS status_key
-      FROM notifications n
-      JOIN inquiries i ON i.id = n.entity_id
+      SELECT i.id AS inquiry_id, i.reference, i.source::text AS source, i.contact_name, s.key AS status_key,
+             i.created_at AS "createdAt",
+             'New inquiry ' || i.reference || ' from ' || COALESCE(r.name, i.contact_name) AS title,
+             i.description AS body,
+             n.id AS notification_id
+      FROM inquiries i
       JOIN inquiry_statuses s ON s.id = i.status_id
-      WHERE n.user_id = $1::uuid AND n.type = 'NEW_INQUIRY' AND n.read_at IS NULL AND n.entity_type = 'inquiry'
-      ORDER BY n.created_at DESC LIMIT 10
+      LEFT JOIN relations r ON r.id = i.relation_id
+      LEFT JOIN notifications n ON n.entity_id = i.id AND n.entity_type = 'inquiry' AND n.type = 'NEW_INQUIRY'
+                               AND n.user_id = $1::uuid AND n.read_at IS NULL
+      WHERE i.first_opened_at IS NULL
+      ORDER BY i.created_at DESC LIMIT 10
     `,
     [userId],
   );
-  const count = await query(`SELECT COUNT(*)::int AS n FROM notifications WHERE user_id = $1::uuid AND type = 'NEW_INQUIRY' AND read_at IS NULL`, [userId]);
+  const count = await query(
+    `SELECT COUNT(*)::int AS n FROM inquiries WHERE first_opened_at IS NULL`,
+  );
   return { total: count.rows[0].n, items: result.rows };
 };
 
@@ -151,7 +172,11 @@ const getFinancials = async () => {
     ),
   ]);
   return {
-    open_projects: { count: projects.rows[0].count, value_excl_vat: r2(projects.rows[0].value_excl_vat), link: "/projects?open=true" },
+    open_projects: {
+      count: projects.rows[0].count,
+      value_excl_vat: r2(projects.rows[0].value_excl_vat),
+      link: "/projects?open=true",
+    },
     open_invoices: {
       count: invoices.rows[0].count,
       outstanding_incl_vat: r2(invoices.rows[0].outstanding_incl_vat),
@@ -169,8 +194,15 @@ const getWarnings = async (actor: IDashActor) => {
     `SELECT auto_type, COUNT(*)::int AS n FROM actions
      WHERE status = 'OPEN' AND auto_type IN ('snelstart_sync_error', 'direct_debit_failed') GROUP BY auto_type`,
   );
-  const count = (type: string) => result.rows.find((r: any) => r.auto_type === type)?.n ?? 0;
-  const warnings: { type: string; severity: string; count: number; message: string; link: string }[] = [];
+  const count = (type: string) =>
+    result.rows.find((r: any) => r.auto_type === type)?.n ?? 0;
+  const warnings: {
+    type: string;
+    severity: string;
+    count: number;
+    message: string;
+    link: string;
+  }[] = [];
 
   if (isAdmin(actor) && count("snelstart_sync_error") > 0) {
     warnings.push({
@@ -194,18 +226,25 @@ const getWarnings = async (actor: IDashActor) => {
 };
 
 const getRecentEvents = async (params: Record<string, any>) => {
-  const { page, limit, skip } = paginationHelper.calculatePagination(params as any);
+  const { page, limit, skip } = paginationHelper.calculatePagination(
+    params as any,
+  );
   const conditions: string[] = [];
   const values: any[] = [];
   let n = 1;
 
   if (params.types) {
-    const types = String(Array.isArray(params.types) ? params.types.join(",") : params.types)
+    const types = String(
+      Array.isArray(params.types) ? params.types.join(",") : params.types,
+    )
       .split(",")
       .map((t) => t.trim().toUpperCase())
       .filter(Boolean);
     if (types.length === 0 || types.some((t) => !/^[A-Z_]{3,50}$/.test(t))) {
-      throw new ApiError(httpStatus.BAD_REQUEST, "Types should be event names like QUOTE_ACCEPTED, separated by commas!");
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "Types should be event names like QUOTE_ACCEPTED, separated by commas!",
+      );
     }
     conditions.push(`t.event_type = ANY($${n++}::text[])`);
     values.push(types);
@@ -213,15 +252,23 @@ const getRecentEvents = async (params: Record<string, any>) => {
     conditions.push(`t.event_type = ANY($${n++}::text[])`);
     values.push(keyEvents.map((e) => e.type));
   }
-  for (const [param, operator] of [["from", ">="], ["to", "<"]] as const) {
+  for (const [param, operator] of [
+    ["from", ">="],
+    ["to", "<"],
+  ] as const) {
     if (params[param]) {
       const day = String(params[param]);
       if (!isValidDay(day)) {
-        throw new ApiError(httpStatus.BAD_REQUEST, `${param} must be a date like 2026-11-30!`);
+        throw new ApiError(
+          httpStatus.BAD_REQUEST,
+          `${param} must be a date like 2026-11-30!`,
+        );
       }
       // a whole Amsterdam day: from the start of `from`, up to (not including) the day after `to`
       const bound = param === "to" ? addDays(day, 1) : day;
-      conditions.push(`t.created_at ${operator} ($${n++}::date::timestamp AT TIME ZONE 'Europe/Amsterdam')`);
+      conditions.push(
+        `t.created_at ${operator} ($${n++}::date::timestamp AT TIME ZONE 'Europe/Amsterdam')`,
+      );
       values.push(bound);
     }
   }
@@ -242,31 +289,193 @@ const getRecentEvents = async (params: Record<string, any>) => {
       `,
       [...values, limit, skip],
     ),
-    query(`SELECT COUNT(*)::int AS total FROM relation_timeline t ${where}`, values),
+    query(
+      `SELECT COUNT(*)::int AS total FROM relation_timeline t ${where}`,
+      values,
+    ),
   ]);
 
   const total = count.rows[0].total;
   const totalPage = Math.ceil(total / limit);
   return {
-    data: rows.rows.map((e: any) => ({ ...e, category: categoryOf(e.event_type) })),
-    meta: { page, limit, total, totalPage, hasNextPage: page < totalPage, hasPrevPage: page > 1 },
+    data: rows.rows.map((e: any) => ({
+      ...e,
+      category: categoryOf(e.event_type),
+    })),
+    meta: {
+      page,
+      limit,
+      total,
+      totalPage,
+      hasNextPage: page < totalPage,
+      hasPrevPage: page > 1,
+    },
   };
 };
 
-const getOfficeDashboard = async (actor: IDashActor) => {
-  const [tiles, highlighted, warnings, events, financials] = await Promise.all([
-    getTiles(actor),
+// ---------------------------------------------------------------------------
+// Overview numbers, the latest projects and the performance graph (office dashboard)
+// ---------------------------------------------------------------------------
+
+// Totals over everything: projects, inquiries, finished projects (status of kind CLOSED) and contacts
+const getOverview = async () => {
+  const result = await query(
+    `SELECT (SELECT COUNT(*) FROM projects)::int AS total_projects,
+            (SELECT COUNT(*) FROM projects p JOIN project_statuses ps ON ps.id = p.status_id WHERE ps.kind = 'CLOSED')::int AS completed_projects,
+            (SELECT COUNT(*) FROM projects p JOIN project_statuses ps ON ps.id = p.status_id WHERE ps.kind <> 'CLOSED')::int AS open_projects,
+            (SELECT COUNT(*) FROM inquiries)::int AS total_inquiries,
+            (SELECT COUNT(*) FROM relation_contacts)::int AS total_contacts,
+            (SELECT COUNT(*) FROM relations WHERE is_active)::int AS total_relations`,
+  );
+  // total_contacts = contact persons; total_relations = the active customers / suppliers they belong to
+  return result.rows[0];
+};
+
+// The five most recently created projects
+const getRecentProjects = async (limit = 5) => {
+  const result = await query(
+    `SELECT p.id, p.number, p.title, p.created_at AS "createdAt",
+            json_build_object('id', r.id, 'name', r.name) AS relation,
+            json_build_object('key', ps.key, 'label_nl', ps.label_nl, 'label_en', ps.label_en, 'kind', ps.kind) AS status
+     FROM projects p
+     JOIN relations r ON r.id = p.relation_id
+     JOIN project_statuses ps ON ps.id = p.status_id
+     ORDER BY p.created_at DESC, p.id DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return result.rows.map((row: any) => ({
+    ...row,
+    link: `/projects/${row.id}`,
+  }));
+};
+
+const maxPerformanceMonths = 36;
+
+// Month by month: projects started and completed, inquiries received (and, for the Beheerder only, what was
+// invoiced). Default = the last six months including this one; `from` / `to` (whole Amsterdam days,
+// like 2026-06-01) choose another period. A month at the edge only counts the days inside the period.
+const getPerformance = async (
+  params: Record<string, any>,
+  actor: IDashActor,
+) => {
+  const today = amsterdamToday();
+  const firstOfMonth = (day: string) => `${day.slice(0, 7)}-01`;
+  const monthsBack = (day: string, n: number) => {
+    const [y, m] = day.slice(0, 7).split("-").map(Number);
+    const index = y * 12 + (m - 1) - n;
+    return `${Math.floor(index / 12)}-${String((index % 12) + 1).padStart(2, "0")}-01`;
+  };
+
+  for (const key of ["from", "to"]) {
+    if (
+      params[key] !== undefined &&
+      (typeof params[key] !== "string" || !isValidDay(params[key]))
+    ) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `${key} must be a date like 2026-11-30!`,
+      );
+    }
+  }
+  const to: string = params.to ?? today;
+  const from: string = params.from ?? monthsBack(to, 5);
+  if (from > to)
+    throw new ApiError(httpStatus.BAD_REQUEST, "from cannot be after to!");
+  const months =
+    Number(to.slice(0, 4)) * 12 +
+    Number(to.slice(5, 7)) -
+    (Number(from.slice(0, 4)) * 12 + Number(from.slice(5, 7))) +
+    1;
+  if (months > maxPerformanceMonths) {
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      `The period can cover at most ${maxPerformanceMonths} months!`,
+    );
+  }
+
+  const amsterdam = (col: string) =>
+    `(${col} AT TIME ZONE 'Europe/Amsterdam')::date`;
+  const result = await query(
+    `
+      WITH months AS (
+        SELECT generate_series(date_trunc('month', $1::date), date_trunc('month', $2::date), interval '1 month')::date AS m
+      ), bounds AS (
+        SELECT m, GREATEST(m, $1::date) AS d_from,
+               LEAST((m + interval '1 month' - interval '1 day')::date, $2::date) AS d_to
+        FROM months
+      )
+      SELECT to_char(b.m, 'YYYY-MM') AS month,
+             (SELECT COUNT(*)::int FROM projects p WHERE ${amsterdam("p.created_at")} BETWEEN b.d_from AND b.d_to) AS projects_started,
+             (SELECT COUNT(*)::int FROM projects p WHERE p.closed_at IS NOT NULL AND ${amsterdam("p.closed_at")} BETWEEN b.d_from AND b.d_to) AS projects_completed,
+             (SELECT COUNT(*)::int FROM inquiries i WHERE ${amsterdam("i.created_at")} BETWEEN b.d_from AND b.d_to) AS inquiries_received,
+             (SELECT COALESCE(SUM(v.total_excl_vat), 0)::float8 FROM invoices v
+               WHERE v.status = 'ISSUED' AND v.invoice_date BETWEEN b.d_from AND b.d_to) AS invoiced_excl_vat
+      FROM bounds b
+      ORDER BY b.m ASC
+    `,
+    [from, to],
+  );
+
+  const money = isAdmin(actor);
+  const data = result.rows.map((row: any) => ({
+    month: row.month,
+    projects_started: row.projects_started,
+    projects_completed: row.projects_completed,
+    inquiries_received: row.inquiries_received,
+    // The money is for the Beheerder only (the same rule as the financials block)
+    ...(money ? { invoiced_excl_vat: r2(row.invoiced_excl_vat) } : {}),
+  }));
+  const sum = (key: string) =>
+    data.reduce((n: number, row: any) => n + (row[key] ?? 0), 0);
+  return {
+    from,
+    to,
+    data,
+    totals: {
+      projects_started: sum("projects_started"),
+      projects_completed: sum("projects_completed"),
+      inquiries_received: sum("inquiries_received"),
+      ...(money ? { invoiced_excl_vat: r2(sum("invoiced_excl_vat")) } : {}),
+    },
+  };
+};
+
+const getOfficeDashboard = async (
+  actor: IDashActor,
+  params: Record<string, any> = {},
+) => {
+  const [
+    // tiles,
+    highlighted,
+    // warnings,
+    events,
+    financials,
+    overview,
+    recentProjects,
+    performance,
+  ] = await Promise.all([
+    // getTiles(actor),
     getHighlightedInquiries(actor.id),
-    getWarnings(actor),
-    getRecentEvents({ limit: 10 }),
+    // getWarnings(actor),
+    getRecentEvents({ limit: 5 }),
     isAdmin(actor) ? getFinancials() : Promise.resolve(null),
+    getOverview(),
+    getRecentProjects(5),
+    getPerformance(params, actor),
   ]);
   return {
-    view: "OFFICE" as const,
+    view:
+      actor.role === "SUPERADMIN" || actor.role === "ADMIN"
+        ? "ADMIN"
+        : ("OFFICE" as const),
     generated_at: new Date().toISOString(),
     highlighted_inquiries: highlighted,
-    warnings,
-    tiles,
+    // warnings,
+    // tiles,
+    overview,
+    recent_projects: recentProjects,
+    performance,
     financials,
     recent_events: events.data,
   };
@@ -291,12 +500,20 @@ const getFieldDashboard = async (actor: IDashActor) => {
     appointments,
     work_orders: { total: workOrders.meta.total, items: workOrders.data },
     actions: actions.mine,
-    messages: { unread_messages: notifications.unread_messages, unread_notifications: notifications.unread_notifications },
+    // messages: {
+    //   unread_messages: notifications.unread_messages,
+    //   unread_notifications: notifications.unread_notifications,
+    // },
   };
 };
 
 // Everyone lands on the right one for their role
-const getDashboard = async (actor: IDashActor) =>
-  ["SUPERADMIN", "ADMIN", "OFFICE"].includes(actor.role) ? getOfficeDashboard(actor) : getFieldDashboard(actor);
+const getDashboard = async (
+  actor: IDashActor,
+  params: Record<string, any> = {},
+) =>
+  ["SUPERADMIN", "ADMIN", "OFFICE"].includes(actor.role)
+    ? getOfficeDashboard(actor, params)
+    : getFieldDashboard(actor);
 
 export const DashboardService = { getDashboard, getRecentEvents };
