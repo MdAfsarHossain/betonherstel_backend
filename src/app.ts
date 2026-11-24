@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import cors from "cors";
 import express, { Application, NextFunction, Request, Response } from "express";
 import httpStatus from "http-status";
@@ -14,7 +15,14 @@ import { PublicInquiryRoute } from "./app/modules/publicinquiry/publicinquiry.ro
 const app: Application = express();
 
 // Behind a proxy (Vercel/ngrok/nginx) — needed for correct client IPs in rate limiting
-app.set("trust proxy", 1);
+// Number of proxies in front of the server (1 = one proxy such as Vercel / nginx). Set TRUST_PROXY=0 when
+// the server is reachable directly: otherwise a client can forge X-Forwarded-For and dodge the rate limits.
+app.set(
+  "trust proxy",
+  Number.isNaN(Number(process.env.TRUST_PROXY ?? 1))
+    ? 1
+    : Number(process.env.TRUST_PROXY ?? 1),
+);
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(compression());
@@ -78,6 +86,11 @@ app.use("/webhooks", WebhookRoute);
 //parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Express 5 leaves req.body undefined when a request has no body; controllers read req.body.x
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.body === undefined) req.body = {};
+  next();
+});
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "..", "public", "uploads")),
@@ -85,7 +98,7 @@ app.use(
 console.log(path.join(__dirname, "..", "public", "uploads"));
 
 // Simple status page for browsers; API clients that ask for JSON still get the old message
-const statusPage = `<!DOCTYPE html>
+const renderStatusPage = (nonce: string) => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -122,7 +135,7 @@ const statusPage = `<!DOCTYPE html>
     <div id="result" aria-live="polite"></div>
     <footer>Betonherstel CRM &middot; API v1</footer>
   </main>
-  <script>
+  <script nonce="${nonce}">
     var btn = document.getElementById("wake");
     var out = document.getElementById("result");
     btn.addEventListener("click", function () {
@@ -158,14 +171,19 @@ app.get("/", (req: Request, res: Response) => {
     });
     return;
   }
-  res.type("html").send(statusPage);
+  // helmet's default policy blocks inline scripts; this page allows only its own, by a one-time nonce
+  const nonce = crypto.randomBytes(16).toString("base64");
+  res.setHeader(
+    "Content-Security-Policy",
+    `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+  );
+  res.type("html").send(renderStatusPage(nonce));
 });
 
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 app.use("/api/v1", apiLimiter);
 app.use("/api/v1/auth", authLimiter);
 app.use("/api/v1", router);
-// app.use("/api/v2", router);
 
 app.use(globalErrorHandler);
 
