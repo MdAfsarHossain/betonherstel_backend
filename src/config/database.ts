@@ -9,7 +9,10 @@ const poolConfig = {
   ssl: {
     rejectUnauthorized: false,
   },
-  max: 20, // Maximum number of clients in the pool
+  // Maximum number of clients in the pool. Supabase's pooler (Supavisor, session mode) only allows `pool_size`
+  // clients (often 15) and answers EMAXCONNSESSION above it, so stay below it: DB_POOL_MAX (default 10).
+  // With several server instances, each has its own pool: use floor(pool_size / instances).
+  max: Number(process.env.DB_POOL_MAX) || 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
   keepAlive: true, // Keep connections alive
@@ -24,7 +27,7 @@ const directPoolConfig = {
   ssl: {
     rejectUnauthorized: false,
   },
-  max: 5,
+  max: Number(process.env.DIRECT_POOL_MAX) || 2, // only used for the schema setup at start-up
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000, // Increased timeout
   keepAlive: true,
@@ -33,6 +36,28 @@ const directPoolConfig = {
 // Create connection pools
 export const pool = new Pool(poolConfig);
 export const directPool = new Pool(directPoolConfig);
+
+// A connection that the database drops (restart, failover, network blip) emits "error" on its client.
+// The pool listens while a client is idle, and pool.query() listens only until the FIRST error; a dying
+// connection often emits a second one ("Connection terminated unexpectedly"). An "error" event nobody
+// listens to is uncaught in Node and the whole server exits. So every client gets a permanent listener
+// when it is created; the pool then discards the dead connection and opens a new one on the next query.
+pool.on("connect", (client) => {
+  client.on("error", (error) => {
+    console.error("❌ Database connection error (the connection is replaced):", error.message);
+  });
+});
+directPool.on("connect", (client) => {
+  client.on("error", (error) => {
+    console.error("❌ Direct database connection error:", error.message);
+  });
+});
+pool.on("error", (error) => {
+  console.error("❌ Database pool error (connection dropped, will reconnect):", error.message);
+});
+directPool.on("error", (error) => {
+  console.error("❌ Direct database pool error:", error.message);
+});
 
 // Test database connection
 export const testConnection = async () => {
@@ -458,6 +483,7 @@ export const initDatabase = async () => {
     // -- Two-factor authentication (FR-AUTH-04). The secret is stored encrypted.
     await client.query(`
       ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS password_changed_at        TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS two_factor_secret          TEXT,
         ADD COLUMN IF NOT EXISTS two_factor_enabled         BOOLEAN NOT NULL DEFAULT false,
         ADD COLUMN IF NOT EXISTS two_factor_recovery_codes  TEXT[] NOT NULL DEFAULT '{}',
