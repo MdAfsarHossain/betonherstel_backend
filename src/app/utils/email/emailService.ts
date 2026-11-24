@@ -17,13 +17,19 @@ let transporter: Transporter | null = null;
 const getTransporter = () => {
   if (!transporter) {
     if (!config.emailSender.email || !config.emailSender.app_pass) {
-      throw new ApiError(httpStatus.INTERNAL_SERVER_ERROR, "Email configuration missing");
+      throw new ApiError(
+        httpStatus.INTERNAL_SERVER_ERROR,
+        "Email configuration missing",
+      );
     }
     transporter = nodemailer.createTransport({
       host: config.emailSender.host,
       port: config.emailSender.port,
       secure: config.emailSender.port === 465,
-      auth: { user: config.emailSender.email, pass: config.emailSender.app_pass },
+      auth: {
+        user: config.emailSender.email,
+        pass: config.emailSender.app_pass,
+      },
       pool: true,
       connectionTimeout: 10000,
     });
@@ -114,7 +120,10 @@ export const sendEmail = async (input: ISendEmail) => {
   } catch (error: any) {
     await writeLog(input, "FAILED", error?.message ?? "Unknown error");
     console.error("❌ Email failed:", error?.message);
-    throw new ApiError(httpStatus.BAD_GATEWAY, "Email could not be sent. Please try again later.");
+    throw new ApiError(
+      httpStatus.BAD_GATEWAY,
+      "Email could not be sent. Please try again later.",
+    );
   }
   await writeLog(input, "SENT");
 };
@@ -122,7 +131,13 @@ export const sendEmail = async (input: ISendEmail) => {
 // Branded wrapper around the template body
 const wrapLayout = (
   body: string,
-  company: { company_name: string; logo_url?: string | null; email?: string | null; phone?: string | null; website?: string | null },
+  company: {
+    company_name: string;
+    logo_url?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    website?: string | null;
+  },
 ) => `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/></head>
@@ -137,7 +152,9 @@ const wrapLayout = (
 }</td></tr>
 <tr><td style="padding:32px;font-size:15px;line-height:1.6;">${body}</td></tr>
 <tr><td style="padding:16px 32px;background:#f9fafb;color:#6b7280;font-size:12px;">${renderMergeFields("{{n}}", { n: company.company_name })}${
-  company.email ? ` &middot; ${renderMergeFields("{{e}}", { e: company.email })}` : ""
+  company.email
+    ? ` &middot; ${renderMergeFields("{{e}}", { e: company.email })}`
+    : ""
 }${company.phone ? ` &middot; ${renderMergeFields("{{p}}", { p: company.phone })}` : ""}</td></tr>
 </table>
 </td></tr>
@@ -164,7 +181,10 @@ export const sendTemplatedEmail = async (input: ISendTemplatedEmail) => {
 
   const variables = { company_name: company.company_name, ...input.variables };
   const subject = renderMergeFields(template.subject, variables, false);
-  const html = wrapLayout(renderMergeFields(template.body_html, variables), company);
+  const html = wrapLayout(
+    renderMergeFields(template.body_html, variables),
+    company,
+  );
 
   await sendEmail({
     to: input.to,
