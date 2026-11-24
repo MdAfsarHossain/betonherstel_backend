@@ -27,7 +27,7 @@ const postgresClientErrors: Record<string, { status: number; message: string }> 
 const isDatabaseUnavailable = (error: any) =>
   ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EAI_AGAIN"].includes(error?.code) ||
   ["57P01", "57P02", "57P03", "53300", "08000", "08001", "08003", "08004", "08006"].includes(error?.code) ||
-  /Connection terminated|timeout exceeded when trying to connect|Client has encountered a connection error|Connection error/i.test(String(error?.message ?? ""));
+  /Connection terminated|timeout exceeded when trying to connect|Client has encountered a connection error|Connection error|EMAXCONN|max clients reached|too many clients|remaining connection slots/i.test(String(error?.message ?? ""));
 
 const snelstartStatus: Record<string, number> = {
   NOT_CONFIGURED: httpStatus.CONFLICT,
