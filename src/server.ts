@@ -21,6 +21,11 @@ import { InvoiceDeliveryService } from "./app/modules/invoice/invoice.delivery.s
 
 const port = config.port || 5000;
 
+// A promise nobody handled (e.g. a failed email) must be logged, never take the server down
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ Unhandled promise rejection:", reason);
+});
+
 // interface ExtendedWebSocket extends WebSocket {
 //   roomId?: string;
 //   userId?: string;
