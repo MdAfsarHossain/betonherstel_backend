@@ -11,6 +11,7 @@ export interface IEmailTemplate {
 
 export const templateKeys = [
   "password_reset",
+  "account_created",
   "portal_invitation",
   "inquiry_confirmation",
   "new_inquiry",
@@ -37,6 +38,8 @@ export type TTemplateKey = (typeof templateKeys)[number];
 // Merge fields each template is given by the code that sends it
 export const templateVariables: Record<TTemplateKey, string[]> = {
   password_reset: ["name", "link", "expires_minutes"],
+  // Internal user created by the Beheerder: login details and the login page
+  account_created: ["name", "email", "password", "link"],
   portal_invitation: ["name", "link"],
   inquiry_confirmation: ["name", "reference", "service"],
   // Internal: sent to the office when an inquiry arrives
@@ -97,6 +100,26 @@ export const defaultTemplates: Record<TTemplateKey, Record<TLanguage, IEmailTemp
         p("You asked to reset your password. Click the button below. This link is valid for {{expires_minutes}} minutes.") +
         button("Set password", "{{link}}") +
         p("If you did not request this, you can ignore this email; your password stays unchanged."),
+    },
+  },
+  account_created: {
+    NL: {
+      subject: "Uw account bij {{company_name}}",
+      body_html:
+        p("Beste {{name}},") +
+        p("Er is een account voor u aangemaakt bij {{company_name}}. Hieronder vindt u uw inloggegevens.") +
+        p("<strong>E-mailadres:</strong> {{email}}<br/><strong>Wachtwoord:</strong> {{password}}") +
+        button("Inloggen", "{{link}}") +
+        p("Wijzig uw wachtwoord na het eerste inloggen."),
+    },
+    EN: {
+      subject: "Your account at {{company_name}}",
+      body_html:
+        p("Dear {{name}},") +
+        p("An account has been created for you at {{company_name}}. Your login details are below.") +
+        p("<strong>Email:</strong> {{email}}<br/><strong>Password:</strong> {{password}}") +
+        button("Log in", "{{link}}") +
+        p("Please change your password after your first login."),
     },
   },
   portal_invitation: {
