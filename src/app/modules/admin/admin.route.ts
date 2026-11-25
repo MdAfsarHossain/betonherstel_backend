@@ -11,6 +11,10 @@ route.use(auth("SUPERADMIN", "ADMIN"));
 // User management (Admin, Office, Field accounts)
 route.get("/users", AdminController.allUsers);
 
+// Two focused lists: the customers' portal accounts, and the employees (admin, office, field crew)
+route.get("/customers", AdminController.allCustomers);
+route.get("/staff", AdminController.allStaff);
+
 route.post(
   "/users",
   validateRequest(AdminValidation.createUser),
