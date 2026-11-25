@@ -266,8 +266,10 @@ const onClose = (ws: IClient) => {
 
 export const attachRealtime = (
   httpServer: HttpServer,
-  allowedOrigins: string[],
+  allowedOrigins: string[] | ((origin: string) => boolean),
 ) => {
+  const isAllowed = (origin: string) =>
+    typeof allowedOrigins === "function" ? allowedOrigins(origin) : allowedOrigins.includes(origin);
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_FRAME_BYTES,
@@ -283,7 +285,7 @@ export const attachRealtime = (
         socket.destroy();
         return;
       }
-      if (origin && !allowedOrigins.includes(origin)) {
+      if (origin && !isAllowed(origin)) {
         socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
         socket.destroy();
         return;
