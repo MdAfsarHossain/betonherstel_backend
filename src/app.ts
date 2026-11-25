@@ -68,9 +68,18 @@ export const allowedOrigins = [
   "http://localhost:3000",
 ];
 
+// Local network (development): 192.168.68.10 and 192.168.68.100-109, any port, http
+const lanOriginPattern = /^http:\/\/192\.168\.68\.10\d?(:\d{1,5})?$/;
+
+// The one rule for CORS and for the live WebSocket upgrade
+export const isAllowedOrigin = (origin: string) =>
+  allowedOrigins.includes(origin) || lanOriginPattern.test(origin);
+
 app.use(
   cors({
-    origin: allowedOrigins,
+    // Requests without an Origin header (curl, Postman, server-to-server) are not browser CORS requests
+    origin: (origin, callback) =>
+      callback(null, !origin || isAllowedOrigin(origin)),
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: [
       "Content-Type",
