@@ -75,9 +75,9 @@ const setup = async (userId: string) => {
   const issuer = (await SettingsService.getCompanySettings()).company_name;
   const uri = otpauthUri(issuer, user.email, secret);
   // A ready-made QR code (PNG as a data URL): show it in an <img src>, scanning it adds the account to the app
-  // const qrCode = await QRCode.toDataURL(uri, { width: 300, margin: 2 });
-  // return { secret, otpauthUri: uri, qrCode };
-  return { secret, otpauthUri: uri };
+  const qrCode = await QRCode.toDataURL(uri, { width: 300, margin: 2 });
+  return { secret, otpauthUri: uri, qrCode };
+  // return { secret, otpauthUri: uri };
 };
 
 // Step 2: prove the app works by entering a code. Turns 2FA on and returns the
