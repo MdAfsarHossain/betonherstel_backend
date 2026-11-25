@@ -23,7 +23,10 @@ route.put("/company/logo", fileUploader.logo, SettingsController.updateLogo);
 
 // Email templates in Dutch and English
 route.get("/email-templates", SettingsController.getEmailTemplates);
-route.get("/email-templates/:key/:language", SettingsController.getEmailTemplate);
+route.get(
+  "/email-templates/:key/:language",
+  SettingsController.getEmailTemplate,
+);
 
 route.put(
   "/email-templates/:key/:language",
@@ -55,7 +58,11 @@ route.get("/audit-log", SettingsController.getAuditLog);
 
 // Mollie payments: connect with an API key (test_... or live_...), check which methods are on
 route.get("/mollie", SettingsController.getMollie);
-route.put("/mollie", validateRequest(InvoiceValidation.setMollieKey), SettingsController.saveMollie);
+route.put(
+  "/mollie",
+  validateRequest(InvoiceValidation.setMollieKey),
+  SettingsController.saveMollie,
+);
 route.delete("/mollie", SettingsController.removeMollie);
 route.post("/mollie/test", SettingsController.testMollie);
 
