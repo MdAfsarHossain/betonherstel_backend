@@ -11,6 +11,7 @@ export const userColumns = `
   avatar,
   role,
   status,
+  preferred_language,
   created_at as created_at
   `;
 // address,
