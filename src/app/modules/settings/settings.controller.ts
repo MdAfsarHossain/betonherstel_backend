@@ -17,7 +17,10 @@ const getCompany = catchAsync(async (req: Request, res: Response) => {
 });
 
 const updateCompany = catchAsync(async (req: Request, res: Response) => {
-  const result = await SettingsService.updateCompanySettings(req.body, req.user.id);
+  const result = await SettingsService.updateCompanySettings(
+    req.body,
+    req.user.id,
+  );
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -155,25 +158,45 @@ const updateServiceType = catchAsync(async (req: Request, res: Response) => {
 const getMollie = catchAsync(async (req: Request, res: Response) => {
   const result = await MollieService.getStatus();
 
-  sendResponse(res, { statusCode: httpStatus.OK, success: true, message: "Mollie status fetched successfully", data: result });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Mollie status fetched successfully",
+    data: result,
+  });
 });
 
 const saveMollie = catchAsync(async (req: Request, res: Response) => {
   const result = await MollieService.saveKey(req.body.api_key, req.user.id);
 
-  sendResponse(res, { statusCode: httpStatus.OK, success: true, message: "Mollie connected successfully", data: result });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Mollie connected successfully",
+    data: result,
+  });
 });
 
 const removeMollie = catchAsync(async (req: Request, res: Response) => {
   const result = await MollieService.removeKey(req.user.id);
 
-  sendResponse(res, { statusCode: httpStatus.OK, success: true, message: "Mollie disconnected", data: result });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Mollie disconnected",
+    data: result,
+  });
 });
 
 const testMollie = catchAsync(async (req: Request, res: Response) => {
   const result = await MollieService.testConnection();
 
-  sendResponse(res, { statusCode: httpStatus.OK, success: true, message: "Mollie connection works", data: result });
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Mollie connection works",
+    data: result,
+  });
 });
 
 export const SettingsController = {

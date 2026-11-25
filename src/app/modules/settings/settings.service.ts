@@ -466,7 +466,7 @@ const previewPdf = async (languageParam?: string) => {
   const language = toLanguage(languageParam);
   const company = await getCompanySettings();
   const logo = await loadLogo(company.logo_url);
-  console.log(company);
+  // console.log(company);
 
   return createSamplePdf(company, language, logo);
 };
