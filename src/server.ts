@@ -1,5 +1,5 @@
 import { Server } from "http";
-import app, { allowedOrigins } from "./app";
+import app, { isAllowedOrigin } from "./app";
 import config from "./config";
 import cron from "node-cron";
 import seedSuperAdmin from "./app/seedSuperAdmin";
@@ -43,7 +43,7 @@ async function main() {
   // seedSuperAdmin();
 
   // Live updates (a native WebSocket at /ws on the same port): notifications and the project chat
-  attachRealtime(server, allowedOrigins);
+  attachRealtime(server, isAllowedOrigin);
 
   // =========================
   // START CRON JOBS
@@ -58,10 +58,12 @@ function startCronJobs() {
   cron.schedule(
     "5 0 * * *",
     async () => {
-      const expired = await QuoteJobs.expireOverdueQuotes().catch((error: any) => {
-        console.error("❌ Quotation expiry job failed:", error);
-        return 0;
-      });
+      const expired = await QuoteJobs.expireOverdueQuotes().catch(
+        (error: any) => {
+          console.error("❌ Quotation expiry job failed:", error);
+          return 0;
+        },
+      );
       if (expired > 0) console.log(`✅ ${expired} quotation(s) expired`);
     },
     { timezone: "Europe/Amsterdam" },
@@ -70,11 +72,14 @@ function startCronJobs() {
   cron.schedule(
     "0 8 * * 1-5",
     async () => {
-      const reminded = await QuoteJobs.sendFollowUpReminders().catch((error: any) => {
-        console.error("❌ Quotation follow-up job failed:", error);
-        return 0;
-      });
-      if (reminded > 0) console.log(`✅ ${reminded} quotation follow-up reminder(s) sent`);
+      const reminded = await QuoteJobs.sendFollowUpReminders().catch(
+        (error: any) => {
+          console.error("❌ Quotation follow-up job failed:", error);
+          return 0;
+        },
+      );
+      if (reminded > 0)
+        console.log(`✅ ${reminded} quotation follow-up reminder(s) sent`);
     },
     { timezone: "Europe/Amsterdam" },
   );
@@ -83,11 +88,14 @@ function startCronJobs() {
   cron.schedule(
     "0 9 * * *",
     async () => {
-      const reminded = await InvoiceDeliveryService.sendDueReminders().catch((error: any) => {
-        console.error("❌ Invoice reminder job failed:", error);
-        return 0;
-      });
-      if (reminded > 0) console.log(`✅ ${reminded} invoice payment reminder(s) sent`);
+      const reminded = await InvoiceDeliveryService.sendDueReminders().catch(
+        (error: any) => {
+          console.error("❌ Invoice reminder job failed:", error);
+          return 0;
+        },
+      );
+      if (reminded > 0)
+        console.log(`✅ ${reminded} invoice payment reminder(s) sent`);
     },
     { timezone: "Europe/Amsterdam" },
   );
@@ -101,7 +109,10 @@ function startCronJobs() {
         console.error("❌ Action job failed:", error);
         return null;
       });
-      if (result) console.log(`✅ Actions: ${result.quote_follow_ups} quote follow-up(s), ${result.overdue_invoices} overdue invoice(s), ${result.closed} closed`);
+      if (result)
+        console.log(
+          `✅ Actions: ${result.quote_follow_ups} quote follow-up(s), ${result.overdue_invoices} overdue invoice(s), ${result.closed} closed`,
+        );
     },
     { timezone: "Europe/Amsterdam" },
   );
@@ -111,11 +122,16 @@ function startCronJobs() {
   cron.schedule(
     "0 6 * * *",
     async () => {
-      const result = await ContractJobs.runScheduledJobs().catch((error: any) => {
-        console.error("❌ Subscription job failed:", error);
-        return null;
-      });
-      if (result) console.log(`✅ Subscriptions: ${result.billed} billed, ${result.ended} ended, ${result.failed} failed, ${result.visits_planned} visit(s) planned`);
+      const result = await ContractJobs.runScheduledJobs().catch(
+        (error: any) => {
+          console.error("❌ Subscription job failed:", error);
+          return null;
+        },
+      );
+      if (result)
+        console.log(
+          `✅ Subscriptions: ${result.billed} billed, ${result.ended} ended, ${result.failed} failed, ${result.visits_planned} visit(s) planned`,
+        );
     },
     { timezone: "Europe/Amsterdam" },
   );
@@ -127,10 +143,15 @@ function startCronJobs() {
       console.error("❌ SnelStart sync failed:", error?.message ?? error);
       return null;
     });
-    if (result?.ran) console.log(`✅ SnelStart: ${result.sent} sent, ${result.failed} failed, ${result.retrying} to retry, ${result.settled} settled`);
+    if (result?.ran)
+      console.log(
+        `✅ SnelStart: ${result.sent} sent, ${result.failed} failed, ${result.retrying} to retry, ${result.settled} settled`,
+      );
   });
 
-  console.log("Cron jobs scheduled: quotation expiry (00:05) and follow-ups (08:00, Mon-Fri)");
+  console.log(
+    "Cron jobs scheduled: quotation expiry (00:05) and follow-ups (08:00, Mon-Fri)",
+  );
   console.log("Cron jobs scheduled: automatic tasks (07:30)");
   console.log("Cron jobs scheduled: subscription billing and visits (06:00)");
   console.log("Cron jobs scheduled: invoice payment reminders (09:00)");
