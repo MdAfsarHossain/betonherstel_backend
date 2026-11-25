@@ -25,7 +25,10 @@ const hashToken = (token: string) =>
 
 // Compared against when the email is unknown, so a wrong email and a wrong
 // password take the same time and give the same answer.
-const dummyHash = bcrypt.hashSync("not-a-real-password", Number(config.bcrypt_salt_rounds) || 12);
+const dummyHash = bcrypt.hashSync(
+  "not-a-real-password",
+  Number(config.bcrypt_salt_rounds) || 12,
+);
 
 // Login User
 const loginUserFromDB = async (
@@ -106,9 +109,13 @@ const refreshToken = async (token: string) => {
   if (
     user.password_changed_at &&
     typeof payload.iat === "number" &&
-    payload.iat < Math.floor(new Date(user.password_changed_at).getTime() / 1000)
+    payload.iat <
+      Math.floor(new Date(user.password_changed_at).getTime() / 1000)
   ) {
-    throw new ApiError(httpStatus.UNAUTHORIZED, "Your password was changed. Please sign in again!");
+    throw new ApiError(
+      httpStatus.UNAUTHORIZED,
+      "Your password was changed. Please sign in again!",
+    );
   }
 
   if (requiresTwoFactor(user.role) && !user.two_factor_enabled) {
@@ -148,7 +155,9 @@ const forgotPassword = async (payload: { email: string }) => {
     // At most one link per minute per account (stops email flooding). The check and the new link
     // are one step behind a per-account lock, so parallel requests cannot all pass the check.
     const created = await transaction(async (client) => {
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`pwreset:${user.id}`]);
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `pwreset:${user.id}`,
+      ]);
       const recent = await client.query(
         `SELECT 1 FROM password_reset_tokens
          WHERE user_id = $1::uuid AND created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'`,
@@ -185,7 +194,9 @@ const forgotPassword = async (payload: { email: string }) => {
     } catch (error) {
       // Already logged by the email service; do not reveal the failure to the caller
     }
-  })().catch((error) => console.error("❌ Password reset link failed:", error?.message ?? error));
+  })().catch((error) =>
+    console.error("❌ Password reset link failed:", error?.message ?? error),
+  );
 
   return { message };
 };
