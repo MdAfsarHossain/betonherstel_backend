@@ -17,6 +17,32 @@ const allUsers = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
+// Customers' portal accounts
+const allCustomers = catchAsync(async (req: Request, res: Response) => {
+  const result = await AdminService.allCustomers(req.query);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Customers fetched successfully",
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
+// Employees: admin, office and field crew
+const allStaff = catchAsync(async (req: Request, res: Response) => {
+  const result = await AdminService.allStaff(req.query);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: "Staff fetched successfully",
+    data: result.data,
+    meta: result.meta,
+  });
+});
+
 // Single user
 const getUserById = catchAsync(async (req: Request, res: Response) => {
   const result = await AdminService.getUserById(req.params.id as string);
@@ -31,7 +57,7 @@ const getUserById = catchAsync(async (req: Request, res: Response) => {
 
 // Create internal user
 const createUser = catchAsync(async (req: Request, res: Response) => {
-  const result = await AdminService.createUser(req.body);
+  const result = await AdminService.createUser(req.body, req.user.id);
 
   sendResponse(res, {
     statusCode: httpStatus.CREATED,
@@ -75,6 +101,8 @@ const resetTwoFactor = catchAsync(async (req: Request, res: Response) => {
 export const AdminController = {
   resetTwoFactor,
   allUsers,
+  allCustomers,
+  allStaff,
   getUserById,
   createUser,
   updateUserByAdmin,

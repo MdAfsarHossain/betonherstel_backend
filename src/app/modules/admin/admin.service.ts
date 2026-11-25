@@ -9,6 +9,8 @@ import { paginationHelper } from "../../helpers/paginationHelper";
 import { invalidateAuthCache } from "../../middlewares/auth";
 import { disconnectUser } from "../../lib/realtime";
 import { logAudit } from "../../utils/audit";
+import { sendTemplatedEmail } from "../../utils/email/emailService";
+import { TLanguage } from "../../utils/i18n";
 import {
   assertEmailAvailable,
   normalizeEmail,
@@ -102,6 +104,147 @@ const allUsers = async (pagination: any) => {
   };
 };
 
+// Two focused lists for the Beheerder: the customers' portal accounts, and the employees.
+// Only the main facts are returned; GET /admin/users/:id has everything. SUPERADMIN is never listed.
+const staffRoles = ["ADMIN", "OFFICE", "FIELD"];
+const userStatuses = [
+  "PENDING",
+  "ACTIVE",
+  "INACTIVE",
+  "BLOCKED",
+  "AVAILABLE",
+  "UNAVAILABLE",
+];
+
+const listUsersByRole = async (
+  params: Record<string, any>,
+  roles: string[],
+  kind: "customers" | "staff",
+) => {
+  const { page, limit, skip, sortBy, sortOrder } =
+    paginationHelper.calculatePagination(params);
+
+  // Sort column / direction go into the SQL text, so only whitelisted values are allowed
+  const sortable: Record<string, string> = {
+    created_at: "u.created_at",
+    name: "LOWER(u.name)",
+    email: "LOWER(u.email)",
+    status: "u.status::text",
+    ...(kind === "staff"
+      ? { role: "u.role::text" }
+      : { last_login_at: "u.last_login_at" }),
+  };
+  const orderColumn = sortable[sortBy] ?? "u.created_at";
+  const direction = String(sortOrder).toLowerCase() === "asc" ? "ASC" : "DESC";
+
+  const values: any[] = [];
+  const push = (v: any) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
+
+  // Staff can be narrowed to some of its roles (?role=OFFICE or ?role=OFFICE,FIELD)
+  let wanted = roles;
+  if (kind === "staff" && params.role) {
+    wanted = String(params.role)
+      .split(",")
+      .map((x) => x.trim().toUpperCase())
+      .filter(Boolean);
+    if (wanted.length === 0 || wanted.some((r) => !roles.includes(r))) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `role should be one or more of ${roles.join(", ")}!`,
+      );
+    }
+  }
+  const conditions: string[] = [`u.role::text = ANY(${push(wanted)}::text[])`];
+
+  if (params.status) {
+    const list = String(params.status)
+      .split(",")
+      .map((x) => x.trim().toUpperCase())
+      .filter(Boolean);
+    if (list.length === 0 || list.some((x) => !userStatuses.includes(x))) {
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        `status should be one or more of ${userStatuses.join(", ")}!`,
+      );
+    }
+    conditions.push(`u.status::text = ANY(${push(list)}::text[])`);
+  }
+  if (params.is_active !== undefined) {
+    conditions.push(
+      `u.is_active = ${push(String(params.is_active) === "true")}`,
+    );
+  }
+  if (kind === "customers" && params.relation_id) {
+    assertUuid(String(params.relation_id), "relation id");
+    conditions.push(`u.relation_id = ${push(params.relation_id)}::uuid`);
+  }
+  if (params.searchTerm) {
+    const p = push(
+      `%${String(
+        Array.isArray(params.searchTerm)
+          ? params.searchTerm[0]
+          : params.searchTerm,
+      )
+        .trim()
+        .replace(/[%_\\]/g, "\\$&")}%`,
+    );
+    conditions.push(
+      kind === "customers"
+        ? `(u.name ILIKE ${p} OR u.email ILIKE ${p} OR u.phone_number ILIKE ${p} OR r.name ILIKE ${p})`
+        : `(u.name ILIKE ${p} OR u.email ILIKE ${p} OR u.phone_number ILIKE ${p})`,
+    );
+  }
+  const where = `WHERE ${conditions.join(" AND ")}`;
+
+  const columns =
+    kind === "customers"
+      ? `u.id, u.name, u.email, u.phone_number, u.avatar, u.status, u.is_active, u.last_login_at,
+         CASE WHEN r.id IS NULL THEN NULL ELSE json_build_object('id', r.id, 'name', r.name, 'type', r.type) END AS relation,
+         u.created_at AS "createdAt"`
+      : `u.id, u.name, u.email, u.phone_number, u.avatar, u.role, u.status, u.is_active,
+         u.created_at AS "createdAt"`;
+  const join =
+    kind === "customers" ? "LEFT JOIN relations r ON r.id = u.relation_id" : "";
+
+  const [rows, count] = await Promise.all([
+    query(
+      `SELECT ${columns} FROM users u ${join} ${where}
+       ORDER BY ${orderColumn} ${direction} NULLS LAST, u.id ASC
+       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, limit, skip],
+    ),
+    query(
+      `SELECT COUNT(*)::int AS total FROM users u ${join} ${where}`,
+      values,
+    ),
+  ]);
+
+  const total = count.rows[0].total;
+  const totalPage = Math.ceil(total / limit);
+  return {
+    data: rows.rows,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPage,
+      hasNextPage: page < totalPage,
+      hasPrevPage: page > 1,
+    },
+  };
+};
+
+// Customers' portal accounts (role CUSTOMER), each with the relation it belongs to
+const allCustomers = (params: Record<string, any>) =>
+  listUsersByRole(params, ["CUSTOMER"], "customers");
+
+// Employees: admin, office and field crew
+const allStaff = (params: Record<string, any>) =>
+  listUsersByRole(params, staffRoles, "staff");
+
 // Get one user by id (Beheerder)
 const getUserById = async (id: string) => {
   assertUuid(id, "user id");
@@ -120,7 +263,7 @@ const getUserById = async (id: string) => {
 };
 
 // Create an internal user (Beheerder only; there is no public self-registration)
-const createUser = async (payload: ICreateUser) => {
+const createUser = async (payload: ICreateUser, actorId?: string) => {
   const email = normalizeEmail(payload.email);
   await assertEmailAvailable(email);
 
@@ -150,7 +293,31 @@ const createUser = async (payload: ICreateUser) => {
     ],
   );
 
-  return result.rows[0];
+  const created = result.rows[0];
+
+  // Email the login details to the new user. A failing email never undoes the creation:
+  // the response says whether it was sent.
+  let emailSent = true;
+  try {
+    await sendTemplatedEmail({
+      to: email,
+      templateKey: "account_created",
+      language: (payload.preferred_language ?? "NL") as TLanguage,
+      variables: {
+        name: payload.name.trim(),
+        email,
+        password: payload.password,
+        link: `${config.frontend_url}/login`,
+      },
+      related: { type: "user", id: created.id },
+      sentBy: actorId ?? null,
+    });
+  } catch (error: any) {
+    emailSent = false;
+    console.error("❌ Could not send the account email:", error?.message);
+  }
+
+  return { ...created, welcome_email: { sent: emailSent } };
 };
 
 // Update another user: edit, deactivate, re-assign role (Beheerder only)
@@ -218,8 +385,18 @@ const updateUserByAdmin = async (
   // Role / status changes must apply immediately, not after the auth cache TTL
   invalidateAuthCache(targetId);
   // ...and a deactivated, blocked or no-longer-employee account loses its live connection
-  const access = (await query(`SELECT role::text AS role, status::text AS status, is_active FROM users WHERE id = $1::uuid`, [targetId])).rows[0];
-  if (access && (!access.is_active || access.status !== "ACTIVE" || !["SUPERADMIN", "ADMIN", "OFFICE", "FIELD"].includes(access.role))) {
+  const access = (
+    await query(
+      `SELECT role::text AS role, status::text AS status, is_active FROM users WHERE id = $1::uuid`,
+      [targetId],
+    )
+  ).rows[0];
+  if (
+    access &&
+    (!access.is_active ||
+      access.status !== "ACTIVE" ||
+      !["SUPERADMIN", "ADMIN", "OFFICE", "FIELD"].includes(access.role))
+  ) {
     disconnectUser(targetId);
   }
 
@@ -243,7 +420,10 @@ const resetTwoFactor = async (
     throw new ApiError(httpStatus.NOT_FOUND, "User not found!");
   }
 
-  if (targetResult.rows[0].role === "SUPERADMIN" && actor.role !== "SUPERADMIN") {
+  if (
+    targetResult.rows[0].role === "SUPERADMIN" &&
+    actor.role !== "SUPERADMIN"
+  ) {
     throw new ApiError(
       httpStatus.FORBIDDEN,
       "You are not allowed to modify a super admin!",
@@ -276,6 +456,8 @@ const resetTwoFactor = async (
 export const AdminService = {
   resetTwoFactor,
   allUsers,
+  allCustomers,
+  allStaff,
   getUserById,
   createUser,
   updateUserByAdmin,
