@@ -38,8 +38,10 @@ import {
 import { buildQuotePdf } from "./quote.pdf";
 import { QuoteTemplateService } from "./quote.template.service";
 import { fromCents, toCents } from "../../utils/money";
+import { MessageService } from "../messages/message.service";
 import { notifyAboutQuote } from "../messages/notification.shared";
 import { inviteCustomerAfterQuote } from "../portal/portal.autoinvite";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Offertes (SRS 4.7). A quotation is made for a customer (relation), usually from an
 // inquiry, has sections with priced lines, goes out as a branded PDF by email and is
@@ -200,7 +202,7 @@ const getQuoteById = async (id: string, client?: any) => {
     throw new ApiError(httpStatus.NOT_FOUND, "Quotation not found!");
   }
 
-  const [sections, lines, attachments, revisions] = await Promise.all([
+  const [sections, lines, attachments, revisions, comments] = await Promise.all([
     q(
       `SELECT id, title, sort_order FROM quote_sections WHERE quote_id = $1::uuid ORDER BY sort_order ASC`,
       [id],
@@ -214,6 +216,8 @@ const getQuoteById = async (id: string, client?: any) => {
       [id],
     ),
     revisionsOf(id, client),
+    // Office comments of the whole file (inquiry, every revision, project). Not inside a transaction.
+    client ? Promise.resolve(null) : MessageService.getCommentsOfRecord("quote", id),
   ]);
 
   const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -246,6 +250,7 @@ const getQuoteById = async (id: string, client?: any) => {
     attachments: attachments.rows,
     calculation: totalsToAmounts(calc),
     revisions,
+    ...(comments ? { comments: comments.data, comments_total: comments.total } : {}),
   };
 };
 
@@ -292,7 +297,7 @@ const normalizeAddress = (address: IQuoteAddress) => ({
 const logQuoteEvent = (
   client: any,
   quote: { id: string; relation_id: string },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},

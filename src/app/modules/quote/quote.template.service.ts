@@ -25,7 +25,11 @@ const templateColumns = `
 `;
 
 const clean = (value?: string | null) =>
-  typeof value === "string" ? (value.trim() === "" ? null : value.trim()) : null;
+  typeof value === "string"
+    ? value.trim() === ""
+      ? null
+      : value.trim()
+    : null;
 
 const getTemplates = async () => {
   const result = await query(
@@ -40,10 +44,15 @@ const getTemplates = async () => {
 };
 
 // Create or replace the texts for a service type + language
-const upsertTemplate = async (payload: IUpsertQuoteTemplate, actorId: string) => {
+const upsertTemplate = async (
+  payload: IUpsertQuoteTemplate,
+  actorId: string,
+) => {
   let serviceTypeId: string | null = null;
   if (payload.service_type) {
-    const st = await query(`SELECT id FROM service_types WHERE key = $1`, [payload.service_type]);
+    const st = await query(`SELECT id FROM service_types WHERE key = $1`, [
+      payload.service_type,
+    ]);
     if (st.rows.length === 0) {
       throw new ApiError(httpStatus.BAD_REQUEST, "Unknown service type!");
     }
@@ -78,7 +87,10 @@ const upsertTemplate = async (payload: IUpsertQuoteTemplate, actorId: string) =>
         action: "UPDATE",
         entity_type: "quote_template",
         entity_id: result.rows[0].id,
-        changes: { service_type: payload.service_type ?? null, language: payload.language },
+        changes: {
+          service_type: payload.service_type ?? null,
+          language: payload.language,
+        },
       },
       client,
     );
@@ -96,17 +108,32 @@ const deleteTemplate = async (id: string, actorId: string) => {
   assertUuid(id, "template id");
 
   await transaction(async (client) => {
-    const result = await client.query(`DELETE FROM quote_templates WHERE id = $1::uuid RETURNING id`, [id]);
+    const result = await client.query(
+      `DELETE FROM quote_templates WHERE id = $1::uuid RETURNING id`,
+      [id],
+    );
     if (result.rows.length === 0) {
       throw new ApiError(httpStatus.NOT_FOUND, "Template not found!");
     }
-    await logAudit({ actor_id: actorId, action: "DELETE", entity_type: "quote_template", entity_id: id }, client);
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "DELETE",
+        entity_type: "quote_template",
+        entity_id: id,
+      },
+      client,
+    );
   });
 };
 
 // The texts a new quotation starts with: the template for its service type, with
 // the general template for the language filling any field it leaves empty
-const getStartingTexts = async (serviceTypeId: string | null, language: string, client?: any) => {
+const getStartingTexts = async (
+  serviceTypeId: string | null,
+  language: string,
+  client?: any,
+) => {
   const run = client ? client.query.bind(client) : query;
   const result = await run(
     `
