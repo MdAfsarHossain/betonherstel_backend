@@ -14,6 +14,7 @@ import { sendTemplatedEmail } from "../../utils/email/emailService";
 import { TLanguage, toLanguage } from "../../utils/i18n";
 import { amsterdamToday } from "../../utils/dates";
 import { createAutomaticAction } from "../actions/actions.shared";
+import { MessageService } from "../messages/message.service";
 import { notify, officeUserIds } from "../messages/notification.shared";
 import { RelationService } from "../relation/relation.service";
 import { SettingsService } from "../settings/settings.service";
@@ -148,7 +149,7 @@ const getInquiryById = async (id: string, markOpenedBy?: string) => {
     throw new ApiError(httpStatus.NOT_FOUND, "Inquiry not found!");
   }
 
-  const [photos, quotes, appointments] = await Promise.all([
+  const [photos, quotes, appointments, comments] = await Promise.all([
     query(
       `SELECT ${photoColumns} FROM inquiry_photos WHERE inquiry_id = $1::uuid ORDER BY created_at ASC`,
       [id],
@@ -180,6 +181,8 @@ const getInquiryById = async (id: string, markOpenedBy?: string) => {
       `,
       [id],
     ),
+    // Office comments of the whole file (this inquiry, its quotations, the project made from them)
+    MessageService.getCommentsOfRecord("inquiry", id),
   ]);
 
   return {
@@ -187,6 +190,8 @@ const getInquiryById = async (id: string, markOpenedBy?: string) => {
     photos: photos.rows,
     quotes: quotes.rows,
     appointments: appointments.rows,
+    comments: comments.data,
+    comments_total: comments.total,
   };
 };
 
@@ -282,7 +287,9 @@ const notifyNewInquiry = async (
         },
         related: { type: "inquiry", id: inquiry.id },
         sentBy: actorId,
-      }),
+        // Handled at once: a database query follows before allSettled, and an unhandled rejection
+        // in between would stop the whole server
+      }).catch(() => undefined),
     );
   }
 
@@ -319,7 +326,7 @@ const notifyNewInquiry = async (
           link: `${config.frontend_url}/inquiries/${inquiry.id}`,
         },
         related: { type: "inquiry", id: inquiry.id },
-      }),
+      }).catch(() => undefined),
     );
   }
 
