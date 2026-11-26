@@ -12,7 +12,8 @@ const isValidIban = (value: string) => {
     String(ch.charCodeAt(0) - 55),
   );
   let remainder = 0;
-  for (const digit of numeric) remainder = (remainder * 10 + Number(digit)) % 97;
+  for (const digit of numeric)
+    remainder = (remainder * 10 + Number(digit)) % 97;
   return remainder === 1;
 };
 
@@ -28,7 +29,10 @@ const vatRateSchema = z
   .object({
     code: z
       .string()
-      .regex(/^[A-Z0-9_-]{1,20}$/, "VAT code must be 1-20 characters: A-Z, 0-9, _ or -"),
+      .regex(
+        /^[A-Z0-9_-]{1,20}$/,
+        "VAT code must be 1-20 characters: A-Z, 0-9, _ or -",
+      ),
     label: z.string().trim().min(1).max(50),
     rate: z.number().min(0).max(100),
     reverse_charge: z.boolean(),
@@ -42,14 +46,16 @@ const vatRateSchema = z
 const numberFormat = z
   .string()
   .max(40)
-  .regex(/^[A-Za-z0-9\-_/.{}]+$/, "Only letters, digits and - _ / . { } are allowed!")
+  .regex(
+    /^[A-Za-z0-9\-_/.{}]+$/,
+    "Only letters, digits and - _ / . { } are allowed!",
+  )
   .refine((f) => /\{N{1,9}\}/.test(f), {
     message: "Format needs a counter such as {NNNN}!",
   })
-  .refine(
-    (f) => (f.match(/\{N+\}/g) || []).length === 1,
-    { message: "Format must contain exactly one counter!" },
-  );
+  .refine((f) => (f.match(/\{N+\}/g) || []).length === 1, {
+    message: "Format must contain exactly one counter!",
+  });
 
 const updateCompany = z.object({
   body: z.object({
@@ -61,7 +67,10 @@ const updateCompany = z.object({
     house_number: optionalText(20),
     postcode: optionalText(12),
     city: optionalText(100),
-    country: z.string().regex(/^[A-Za-z]{2}$/, "Country must be a 2-letter ISO code!").optional(),
+    country: z
+      .string()
+      .regex(/^[A-Za-z]{2}$/, "Country must be a 2-letter ISO code!")
+      .optional(),
     kvk_number: z
       .string()
       .regex(/^[0-9]{8}$/, "KvK number must be 8 digits!")
@@ -69,16 +78,24 @@ const updateCompany = z.object({
       .nullish(),
     vat_number: z
       .string()
-      .regex(/^[A-Za-z]{2}[A-Za-z0-9. ]{2,18}$/, "VAT number is not valid (for example NL123456789B01)!")
+      .regex(
+        /^[A-Za-z]{2}[A-Za-z0-9. ]{2,18}$/,
+        "VAT number is not valid (for example NL123456789B01)!",
+      )
       .or(z.literal(""))
       .nullish(),
     iban: z
       .string()
-      .refine((v) => v === "" || isValidIban(v), { message: "IBAN is not valid!" })
+      .refine((v) => v === "" || isValidIban(v), {
+        message: "IBAN is not valid!",
+      })
       .nullish(),
     bic: z
       .string()
-      .regex(/^[A-Za-z]{4}[A-Za-z]{2}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$/, "BIC is not valid!")
+      .regex(
+        /^[A-Za-z]{4}[A-Za-z]{2}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$/,
+        "BIC is not valid!",
+      )
       .or(z.literal(""))
       .nullish(),
     bank_name: optionalText(100),
@@ -94,14 +111,19 @@ const updateCompany = z.object({
       .array(vatRateSchema)
       .min(1)
       .max(20)
-      .refine((rates) => new Set(rates.map((r) => r.code)).size === rates.length, {
-        message: "VAT codes must be unique!",
-      })
+      .refine(
+        (rates) => new Set(rates.map((r) => r.code)).size === rates.length,
+        {
+          message: "VAT codes must be unique!",
+        },
+      )
       .optional(),
     // Any subset of the document types; the rest keep their current format
     number_formats: z
       .object(
-        Object.fromEntries(docTypes.map((d) => [d, numberFormat.optional()])) as Record<
+        Object.fromEntries(
+          docTypes.map((d) => [d, numberFormat.optional()]),
+        ) as Record<
           (typeof docTypes)[number],
           z.ZodOptional<typeof numberFormat>
         >,
@@ -118,18 +140,19 @@ const language = z.enum(["NL", "EN"]);
 const safeHtml = (html: string) =>
   !/<\s*script|on[a-z]+\s*=|javascript:/i.test(html);
 
-const updateEmailTemplate = z
-  .object({
-    body: z.object({
-      subject: z.string().trim().min(1).max(255),
-      body_html: z
-        .string()
-        .trim()
-        .min(1)
-        .max(20000)
-        .refine(safeHtml, { message: "Scripts and inline event handlers are not allowed!" }),
-    }),
-  });
+const updateEmailTemplate = z.object({
+  body: z.object({
+    subject: z.string().trim().min(1).max(255),
+    body_html: z
+      .string()
+      .trim()
+      .min(1)
+      .max(20000)
+      .refine(safeHtml, {
+        message: "Scripts and inline event handlers are not allowed!",
+      }),
+  }),
+});
 
 // {{fields}} used in a template must be ones the sender provides (catches typos)
 export const unknownMergeFields = (
@@ -139,15 +162,24 @@ export const unknownMergeFields = (
   const allowed = new Set([...templateVariables[key], "company_name"]);
   const used = new Set<string>();
   for (const text of texts) {
-    for (const m of text.matchAll(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi)) used.add(m[1]);
+    for (const m of text.matchAll(/\{\{\s*([a-z0-9_]+)\s*\}\}/gi))
+      used.add(m[1]);
   }
   return [...used].filter((f) => !allowed.has(f));
 };
 
 const createServiceType = z.object({
   body: z.object({
-    label_nl: z.string({ error: "Dutch label is required!" }).trim().min(1).max(100),
-    label_en: z.string({ error: "English label is required!" }).trim().min(1).max(100),
+    label_nl: z
+      .string({ error: "Dutch label is required!" })
+      .trim()
+      .min(1)
+      .max(100),
+    label_en: z
+      .string({ error: "English label is required!" })
+      .trim()
+      .min(1)
+      .max(100),
     sort_order: z.number().int().min(0).max(10000).optional(),
   }),
 });
