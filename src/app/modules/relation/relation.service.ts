@@ -19,6 +19,44 @@ import {
 // Columns and field whitelists
 // ---------------------------------------------------------------------------
 
+// Portal status of a relation (invitation sent? has anyone logged in?), shared by the list and the detail.
+// `pu` is the aggregate of the relation's portal accounts (customer and subcontractor users).
+const portalSummarySelect = `
+  json_build_object(
+    'state', CASE
+      WHEN pu.users = 0 THEN 'NOT_INVITED'
+      WHEN pu.active_with_password > 0 THEN 'ACTIVE'
+      WHEN pu.active_without_password > 0 THEN 'INVITED'
+      ELSE 'DEACTIVATED' END,
+    'users', pu.users,
+    'invited', pu.invited_at IS NOT NULL,
+    'invited_at', pu.invited_at,
+    'has_logged_in', pu.last_login_at IS NOT NULL,
+    'last_login_at', pu.last_login_at
+  ) AS portal`;
+const portalSummaryJoin = `
+  LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS users,
+           COUNT(*) FILTER (WHERE u.is_active AND u.password IS NOT NULL)::int AS active_with_password,
+           COUNT(*) FILTER (WHERE u.is_active AND u.password IS NULL)::int AS active_without_password,
+           MAX(u.portal_invited_at) AS invited_at,
+           MAX(u.last_login_at) AS last_login_at
+    FROM users u
+    WHERE u.relation_id = r.id AND u.role::text IN ('CUSTOMER', 'SUBCONTRACTOR')
+  ) pu ON true`;
+
+// The list shows only the main facts; GET /relations/:id has everything
+const relationSummaryColumns = (alias = "r") => `
+  ${alias}.id,
+  ${alias}.type,
+  ${alias}.name,
+  ${alias}.email,
+  ${alias}.phone,
+  ${alias}.billing_city,
+  ${alias}.is_active,
+  ${alias}.created_at as "createdAt"
+`;
+
 const relationColumns = (alias = "r") => `
   ${alias}.id,
   ${alias}.type,
@@ -304,7 +342,7 @@ const getRelationOrThrow = async (id: string) => {
 const getRelationById = async (id: string) => {
   const relation = await getRelationOrThrow(id);
 
-  const [contacts, addresses] = await Promise.all([
+  const [contacts, addresses, portal, accounts] = await Promise.all([
     query(
       `SELECT ${contactColumns} FROM relation_contacts
        WHERE relation_id = $1::uuid
@@ -317,9 +355,28 @@ const getRelationById = async (id: string) => {
        ORDER BY created_at ASC`,
       [id],
     ),
+    query(
+      `SELECT ${portalSummarySelect} FROM relations r ${portalSummaryJoin} WHERE r.id = $1::uuid`,
+      [id],
+    ),
+    // The portal accounts themselves: who was invited, who has set a password, who logged in
+    query(
+      `SELECT u.id, u.name, u.email, u.role::text AS role,
+              CASE WHEN NOT u.is_active THEN 'DEACTIVATED' WHEN u.password IS NULL THEN 'INVITED' ELSE 'ACTIVE' END AS state,
+              u.portal_invited_at AS invited_at, u.last_login_at
+       FROM users u
+       WHERE u.relation_id = $1::uuid AND u.role::text IN ('CUSTOMER', 'SUBCONTRACTOR')
+       ORDER BY u.created_at ASC`,
+      [id],
+    ),
   ]);
 
-  return { ...relation, contacts: contacts.rows, addresses: addresses.rows };
+  return {
+    ...relation,
+    contacts: contacts.rows,
+    addresses: addresses.rows,
+    portal: { ...portal.rows[0].portal, accounts: accounts.rows },
+  };
 };
 
 // Create a relation. If likely duplicates exist and `allow_duplicate` is not
@@ -529,8 +586,10 @@ const getAllRelations = async (params: Record<string, any>) => {
 
   const result = await query(
     `
-        SELECT ${relationColumns("r")}
+        SELECT ${relationSummaryColumns("r")},
+               ${portalSummarySelect}
         FROM relations r
+        ${portalSummaryJoin}
         ${whereClause}
         ORDER BY ${orderColumn} ${orderDirection}, r.id ASC
         LIMIT $${paramCount} OFFSET $${paramCount + 1}
