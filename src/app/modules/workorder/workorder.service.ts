@@ -34,6 +34,7 @@ import {
 } from "./workorder.interface";
 import { buildWorkOrderPdf } from "./workorder.pdf";
 import { assertDailyLimit } from "../hours/hours.limits";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Werkbonnen (SRS 4.10). Office staff create a work order from a project (or a planned
 // appointment) with instructions, a checklist, materials and a crew. The crew opens it
@@ -119,7 +120,7 @@ const logWorkOrderEvent = (
   client: any,
   workOrder: { id: string },
   relationId: string,
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},
@@ -440,7 +441,7 @@ const getAllWorkOrders = async (params: Record<string, any>, actorId: string) =>
     if (statuses.some((s) => !(workOrderStatuses as readonly string[]).includes(s))) {
       throw new ApiError(httpStatus.BAD_REQUEST, "Status should be OPEN, IN_PROGRESS, COMPLETED or CHECKED!");
     }
-    conditions.push(`w.status = ANY($${n++}::text[])`);
+    conditions.push(`w.status = ANY($${n++}::"WorkOrderStatus"[])`);
     values.push(statuses);
   }
 
