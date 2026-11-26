@@ -260,7 +260,7 @@ const activeProjectInvoices = async (
       SELECT id, number, kind, status, payment_status, total_excl_vat::float8 AS total_excl_vat,
              total_incl_vat::float8 AS total_incl_vat, credited_amount::float8 AS credited_amount
       FROM invoices
-      WHERE project_id = $1::uuid AND kind = ANY($2::text[]) AND payment_status IS DISTINCT FROM 'CREDITED'
+      WHERE project_id = $1::uuid AND kind = ANY($2::"InvoiceKind"[]) AND payment_status IS DISTINCT FROM 'CREDITED'
       ORDER BY created_at ASC
     `,
     [projectId, kinds],
@@ -1346,7 +1346,7 @@ const getAllInvoices = async (params: Record<string, any>) => {
         "Kind should be STANDARD, INSTALMENT, FINAL or CREDIT_NOTE!",
       );
     }
-    conditions.push(`i.kind = ANY($${n++}::text[])`);
+    conditions.push(`i.kind = ANY($${n++}::"InvoiceKind"[])`);
     values.push(kinds);
   }
   if (params.status) {
@@ -1359,7 +1359,7 @@ const getAllInvoices = async (params: Record<string, any>) => {
         "Status should be DRAFT or ISSUED!",
       );
     }
-    conditions.push(`i.status = ANY($${n++}::text[])`);
+    conditions.push(`i.status = ANY($${n++}::"InvoiceStatus"[])`);
     values.push(statuses);
   }
   if (params.payment_status) {
@@ -1372,7 +1372,7 @@ const getAllInvoices = async (params: Record<string, any>) => {
         "Payment status should be OPEN, PARTIALLY_PAID, PAID or CREDITED!",
       );
     }
-    conditions.push(`i.payment_status = ANY($${n++}::text[])`);
+    conditions.push(`i.payment_status = ANY($${n++}::"InvoicePaymentStatus"[])`);
     values.push(statuses);
   }
   for (const [param, column, label] of [
