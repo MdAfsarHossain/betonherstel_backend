@@ -203,7 +203,7 @@ const getAllPurchaseOrders = async (params: Record<string, any>) => {
     if (statuses.some((s) => !(purchaseOrderStatuses as readonly string[]).includes(s))) {
       throw new ApiError(httpStatus.BAD_REQUEST, "Status should be DRAFT, ORDERED, PARTIALLY_RECEIVED, RECEIVED or CANCELLED!");
     }
-    conditions.push(`po.status = ANY($${n++}::text[])`);
+    conditions.push(`po.status = ANY($${n++}::"PurchaseOrderStatus"[])`);
     values.push(statuses);
   }
   for (const [param, column, label] of [

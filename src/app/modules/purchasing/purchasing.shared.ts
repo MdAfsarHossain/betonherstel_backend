@@ -8,6 +8,7 @@ import { calculateTotals } from "../quote/quote.calculation";
 import { RelationService } from "../relation/relation.service";
 import { SettingsService } from "../settings/settings.service";
 import { IDeliveryAddress, IPurchaseLineInput } from "./purchasing.interface";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Pieces shared by the purchase order and supplier invoice services.
 
@@ -192,7 +193,7 @@ export const logPurchasingEvent = (
   client: any,
   supplierId: string,
   entity: { type: "purchase_order" | "supplier_invoice"; id: string },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},

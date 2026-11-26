@@ -151,7 +151,7 @@ const getAllSupplierInvoices = async (params: Record<string, any>) => {
     if (statuses.some((s) => !(supplierInvoiceStatuses as readonly string[]).includes(s))) {
       throw new ApiError(httpStatus.BAD_REQUEST, "Status should be RECEIVED, APPROVED, PAID or VOID!");
     }
-    conditions.push(`si.status = ANY($${n++}::text[])`);
+    conditions.push(`si.status = ANY($${n++}::"SupplierInvoiceStatus"[])`);
     values.push(statuses);
   }
   for (const [param, column, label] of [
@@ -642,7 +642,7 @@ const exportFilter = (params: Record<string, any>) => {
       throw new ApiError(httpStatus.BAD_REQUEST, "Status should be RECEIVED, APPROVED, PAID, VOID or ALL!");
     }
     values.push(statuses);
-    where += ` AND si.status = ANY($3::text[])`;
+    where += ` AND si.status = ANY($3::"SupplierInvoiceStatus"[])`;
   } else if (!status) {
     where += ` AND si.status <> 'VOID'`;
   }
