@@ -5,6 +5,7 @@ import { query } from "../../utils/db";
 import { fromCents, lineAmountCents, toCents } from "../../utils/money";
 import { calculateTotals, totalsToAmounts } from "../quote/quote.calculation";
 import { RelationService } from "../relation/relation.service";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Pieces shared by the invoice services: locking, lines and totals, and the one place that
 // works out whether an invoice is open, partly paid, paid or credited.
@@ -41,7 +42,7 @@ export const lockInvoice = async (client: any, id: string) => {
 export const logInvoiceEvent = (
   client: any,
   invoice: { id: string; relation_id: string },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},
@@ -176,8 +177,8 @@ export const recomputePaymentStatus = async (client: any, invoiceId: string) => 
   await client.query(
     `
       UPDATE invoices
-      SET paid_amount = $2, credited_amount = $3, payment_status = $4::varchar,
-          paid_at = CASE WHEN $4::varchar = 'PAID' THEN $5::timestamptz ELSE NULL END,
+      SET paid_amount = $2, credited_amount = $3, payment_status = $4::"InvoicePaymentStatus",
+          paid_at = CASE WHEN $4::"InvoicePaymentStatus" = 'PAID' THEN $5::timestamptz ELSE NULL END,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = $1::uuid
     `,
