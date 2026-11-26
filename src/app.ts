@@ -66,6 +66,10 @@ export const allowedOrigins = [
   "https://www.portal.business.betonherstel.nl",
   "https://portal.business.betonherstel.nl",
   "http://localhost:3000",
+  "http://localhost:3001",
+  "http://localhost:3002",
+  "http://localhost:3003",
+  "http://localhost:3004",
 ];
 
 // Local network (development): 192.168.68.10 and 192.168.68.100-109, any port, http
