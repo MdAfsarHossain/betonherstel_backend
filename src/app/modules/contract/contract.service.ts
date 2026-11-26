@@ -7,9 +7,20 @@ import { addDays, amsterdamToday, isValidDay } from "../../utils/dates";
 import { query, transaction } from "../../utils/db";
 import { SettingsService } from "../settings/settings.service";
 import { DirectDebitService } from "./contract.directdebit.service";
-import { ICreateContract, IEndContract, IUpdateContract } from "./contract.interface";
 import {
-  clean, contractColumns, dayOfMonth, loadContract, loadCustomer, logContractEvent, nextBillingDate, visitDatesBetween,
+  ICreateContract,
+  IEndContract,
+  IUpdateContract,
+} from "./contract.interface";
+import {
+  clean,
+  contractColumns,
+  dayOfMonth,
+  loadContract,
+  loadCustomer,
+  logContractEvent,
+  nextBillingDate,
+  visitDatesBetween,
 } from "./contract.shared";
 import { toLanguage } from "../../utils/i18n";
 
@@ -19,7 +30,10 @@ import { toLanguage } from "../../utils/i18n";
 
 const assertDay = (value: any, label: string) => {
   if (typeof value !== "string" || !isValidDay(value)) {
-    throw new ApiError(httpStatus.BAD_REQUEST, `${label} must be a date like 2026-12-31!`);
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      `${label} must be a date like 2026-12-31!`,
+    );
   }
 };
 
@@ -40,7 +54,10 @@ const assertVisitAssignees = async (ids: string[] | undefined) => {
     [unique],
   );
   if (found.rows.length !== unique.length) {
-    throw new ApiError(httpStatus.BAD_REQUEST, "A visit can only be given to active office or field users!");
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "A visit can only be given to active office or field users!",
+    );
   }
   return unique;
 };
@@ -48,7 +65,10 @@ const assertVisitAssignees = async (ids: string[] | undefined) => {
 const normalizeAddress = (a: any) => ({
   street: String(a.street).trim(),
   house_number: String(a.house_number).trim(),
-  postcode: String(a.postcode).trim().toUpperCase().replace(/^(\d{4})\s?([A-Z]{2})$/, "$1 $2"),
+  postcode: String(a.postcode)
+    .trim()
+    .toUpperCase()
+    .replace(/^(\d{4})\s?([A-Z]{2})$/, "$1 $2"),
   city: String(a.city).trim(),
   country: String(a.country ?? "NL").toUpperCase(),
 });
@@ -68,6 +88,16 @@ const listColumns = `
   CASE WHEN s.use_direct_debit AND dd.relation_id IS NOT NULL THEN 'DIRECT_DEBIT' ELSE 'PAYMENT_LINK' END AS collection
 `;
 
+// The list shows only the main facts; the detail (GET /contracts/:id) has everything
+const summaryColumns = `
+  s.id, s.number, s.title, s.status,
+  json_build_object('id', r.id, 'name', r.name, 'type', r.type) AS relation,
+  s.amount_excl_vat::float8 AS amount_excl_vat, s.vat_code, s.billing_interval,
+  to_char(s.start_date, 'YYYY-MM-DD') AS start_date, to_char(s.end_date, 'YYYY-MM-DD') AS end_date,
+  to_char(s.next_billing_date, 'YYYY-MM-DD') AS next_billing_date,
+  CASE WHEN s.use_direct_debit AND dd.relation_id IS NOT NULL THEN 'DIRECT_DEBIT' ELSE 'PAYMENT_LINK' END AS collection
+`;
+
 const sortable: Record<string, string> = {
   created_at: "s.created_at",
   number: "s.number",
@@ -77,7 +107,8 @@ const sortable: Record<string, string> = {
 };
 
 const getAll = async (params: Record<string, any>) => {
-  const { page, limit, skip, sortBy, sortOrder } = paginationHelper.calculatePagination(params as any);
+  const { page, limit, skip, sortBy, sortOrder } =
+    paginationHelper.calculatePagination(params as any);
   const where: string[] = [];
   const values: any[] = [];
   const push = (v: any) => {
@@ -86,23 +117,39 @@ const getAll = async (params: Record<string, any>) => {
   };
 
   if (params.status) {
-    const list = String(params.status).split(",").map((x) => x.trim().toUpperCase()).filter(Boolean);
+    const list = String(params.status)
+      .split(",")
+      .map((x) => x.trim().toUpperCase())
+      .filter(Boolean);
     where.push(`s.status = ANY(${push(list)}::text[])`);
   }
   if (params.relation_id) {
     assertUuid(String(params.relation_id), "relation id");
     where.push(`s.relation_id = ${push(params.relation_id)}::uuid`);
   }
-  if (params.billing_interval) where.push(`s.billing_interval = ${push(String(params.billing_interval).toUpperCase())}`);
+  if (params.billing_interval)
+    where.push(
+      `s.billing_interval = ${push(String(params.billing_interval).toUpperCase())}`,
+    );
   if (params.due_within_days !== undefined) {
     const days = Number(params.due_within_days);
-    if (!Number.isInteger(days) || days < 0 || days > 366) throw new ApiError(httpStatus.BAD_REQUEST, "due_within_days must be between 0 and 366!");
-    where.push(`s.status = 'ACTIVE' AND s.next_billing_date <= ${push(addDays(amsterdamToday(), days))}::date`);
+    if (!Number.isInteger(days) || days < 0 || days > 366)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "due_within_days must be between 0 and 366!",
+      );
+    where.push(
+      `s.status = 'ACTIVE' AND s.next_billing_date <= ${push(addDays(amsterdamToday(), days))}::date`,
+    );
   }
   if (params.searchTerm) {
-    const term = `%${String(params.searchTerm).trim().replace(/[%_\\]/g, "\\$&")}%`;
+    const term = `%${String(params.searchTerm)
+      .trim()
+      .replace(/[%_\\]/g, "\\$&")}%`;
     const p = push(term);
-    where.push(`(s.number ILIKE ${p} OR s.title ILIKE ${p} OR r.name ILIKE ${p})`);
+    where.push(
+      `(s.number ILIKE ${p} OR s.title ILIKE ${p} OR r.name ILIKE ${p})`,
+    );
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const orderColumn = sortable[sortBy] ?? sortable.created_at;
@@ -110,21 +157,38 @@ const getAll = async (params: Record<string, any>) => {
 
   const [rows, count] = await Promise.all([
     query(
-      `SELECT ${listColumns} FROM subscriptions s ${listJoins} ${clause}
+      `SELECT ${summaryColumns} FROM subscriptions s ${listJoins} ${clause}
        ORDER BY ${orderColumn} ${direction} NULLS LAST, s.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, limit, skip],
     ),
-    query(`SELECT COUNT(*)::int AS total FROM subscriptions s ${listJoins} ${clause}`, values),
+    query(
+      `SELECT COUNT(*)::int AS total FROM subscriptions s ${listJoins} ${clause}`,
+      values,
+    ),
   ]);
   const total = count.rows[0].total;
   const totalPage = Math.ceil(total / limit);
-  return { data: rows.rows, meta: { page, limit, total, totalPage, hasNextPage: page < totalPage, hasPrevPage: page > 1 } };
+  return {
+    data: rows.rows,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPage,
+      hasNextPage: page < totalPage,
+      hasPrevPage: page > 1,
+    },
+  };
 };
 
 const getById = async (id: string) => {
   assertUuid(id, "subscription id");
-  const found = await query(`SELECT ${listColumns} FROM subscriptions s ${listJoins} WHERE s.id = $1::uuid`, [id]);
-  if (found.rows.length === 0) throw new ApiError(httpStatus.NOT_FOUND, "Subscription not found!");
+  const found = await query(
+    `SELECT ${listColumns} FROM subscriptions s ${listJoins} WHERE s.id = $1::uuid`,
+    [id],
+  );
+  if (found.rows.length === 0)
+    throw new ApiError(httpStatus.NOT_FOUND, "Subscription not found!");
   const contract = found.rows[0];
   const today = amsterdamToday();
 
@@ -159,7 +223,14 @@ const getById = async (id: string) => {
 
   const upcomingVisits =
     contract.status === "ACTIVE" && contract.visits_per_year > 0
-      ? visitDatesBetween(contract.first_visit_date, contract.visits_per_year, today, addDays(today, 400)).filter((d) => !contract.end_date || d <= contract.end_date).slice(0, 4)
+      ? visitDatesBetween(
+          contract.first_visit_date,
+          contract.visits_per_year,
+          today,
+          addDays(today, 400),
+        )
+          .filter((d) => !contract.end_date || d <= contract.end_date)
+          .slice(0, 4)
       : [];
 
   return {
@@ -189,7 +260,9 @@ const getInvoices = async (id: string) => {
 
 const getHistory = async (id: string, params: Record<string, any>) => {
   await loadContract(id);
-  const { page, limit, skip } = paginationHelper.calculatePagination(params as any);
+  const { page, limit, skip } = paginationHelper.calculatePagination(
+    params as any,
+  );
   const scope = `t.entity_type = 'subscription' AND t.entity_id = $1::uuid`;
   const [rows, count] = await Promise.all([
     query(
@@ -198,11 +271,24 @@ const getHistory = async (id: string, params: Record<string, any>) => {
        ORDER BY t.created_at DESC, t.id DESC LIMIT $2 OFFSET $3`,
       [id, limit, skip],
     ),
-    query(`SELECT COUNT(*)::int AS total FROM relation_timeline t WHERE ${scope}`, [id]),
+    query(
+      `SELECT COUNT(*)::int AS total FROM relation_timeline t WHERE ${scope}`,
+      [id],
+    ),
   ]);
   const total = count.rows[0].total;
   const totalPage = Math.ceil(total / limit);
-  return { data: rows.rows, meta: { page, limit, total, totalPage, hasNextPage: page < totalPage, hasPrevPage: page > 1 } };
+  return {
+    data: rows.rows,
+    meta: {
+      page,
+      limit,
+      total,
+      totalPage,
+      hasNextPage: page < totalPage,
+      hasPrevPage: page > 1,
+    },
+  };
 };
 
 // Numbers for the dashboard tile and the overview page
@@ -222,12 +308,18 @@ const getSummary = async () => {
       `SELECT COUNT(*)::int AS n FROM subscriptions s JOIN relation_direct_debit dd ON dd.relation_id = s.relation_id AND dd.mandate_status = 'valid'
        WHERE s.status = 'ACTIVE' AND s.use_direct_debit`,
     ),
-    query(`SELECT COUNT(*)::int AS n FROM subscriptions WHERE status = 'ACTIVE' AND next_billing_date <= $1::date`, [addDays(today, 7)]),
+    query(
+      `SELECT COUNT(*)::int AS n FROM subscriptions WHERE status = 'ACTIVE' AND next_billing_date <= $1::date`,
+      [addDays(today, 7)],
+    ),
   ]);
-  const failed = await query(`SELECT COUNT(*)::int AS n FROM actions WHERE auto_type = 'direct_debit_failed' AND status = 'OPEN'`);
+  const failed = await query(
+    `SELECT COUNT(*)::int AS n FROM actions WHERE auto_type = 'direct_debit_failed' AND status = 'OPEN'`,
+  );
   return {
     ...counts.rows[0],
-    yearly_recurring_excl_vat: Math.round(counts.rows[0].yearly_recurring_excl_vat * 100) / 100,
+    yearly_recurring_excl_vat:
+      Math.round(counts.rows[0].yearly_recurring_excl_vat * 100) / 100,
     with_direct_debit: dd.rows[0].n,
     billing_within_7_days: due.rows[0].n,
     failed_direct_debits_open: failed.rows[0].n,
@@ -243,14 +335,22 @@ const createContract = async (input: ICreateContract, actorId: string) => {
   assertDay(input.start_date, "Start date");
   if (input.end_date) {
     assertDay(input.end_date, "End date");
-    if (input.end_date < input.start_date) throw new ApiError(httpStatus.BAD_REQUEST, "The end date cannot be before the start date!");
+    if (input.end_date < input.start_date)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "The end date cannot be before the start date!",
+      );
   }
   const vatCode = input.vat_code ?? "21";
   await assertVatCode(vatCode);
 
   const visitsPerYear = input.visits_per_year ?? 0;
   if (visitsPerYear > 0) {
-    if (!input.first_visit_date) throw new ApiError(httpStatus.BAD_REQUEST, "The first visit date is required when visits are planned!");
+    if (!input.first_visit_date)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "The first visit date is required when visits are planned!",
+      );
     assertDay(input.first_visit_date, "First visit date");
   }
   const assignees = await assertVisitAssignees(input.visit_assignee_ids);
@@ -258,15 +358,27 @@ const createContract = async (input: ICreateContract, actorId: string) => {
   // The object address: given, or the customer's billing address when it is complete
   let address: any = null;
   if (input.address) address = normalizeAddress(input.address);
-  else if (input.address === undefined && relation.billing_street && relation.billing_house_number && relation.billing_postcode && relation.billing_city) {
+  else if (
+    input.address === undefined &&
+    relation.billing_street &&
+    relation.billing_house_number &&
+    relation.billing_postcode &&
+    relation.billing_city
+  ) {
     address = normalizeAddress({
-      street: relation.billing_street, house_number: relation.billing_house_number,
-      postcode: relation.billing_postcode, city: relation.billing_city, country: relation.billing_country,
+      street: relation.billing_street,
+      house_number: relation.billing_house_number,
+      postcode: relation.billing_postcode,
+      city: relation.billing_city,
+      country: relation.billing_country,
     });
   }
 
   const id = await transaction(async (client) => {
-    const number = await SettingsService.nextDocumentNumber("subscription", client);
+    const number = await SettingsService.nextDocumentNumber(
+      "subscription",
+      client,
+    );
     const inserted = await client.query(
       `
         INSERT INTO subscriptions (
@@ -282,25 +394,69 @@ const createContract = async (input: ICreateContract, actorId: string) => {
         ) RETURNING id, number, relation_id
       `,
       [
-        number, input.relation_id, input.title.trim().slice(0, 255), clean(input.description),
-        address?.street ?? null, address?.house_number ?? null, address?.postcode ?? null, address?.city ?? null, address?.country ?? null,
-        input.amount_excl_vat, vatCode, input.billing_interval, input.start_date, input.end_date ?? null, dayOfMonth(input.start_date),
-        input.payment_term_days ?? 14, input.use_direct_debit ?? true, input.language ?? toLanguage(relation.preferred_language),
-        visitsPerYear, visitsPerYear > 0 ? input.first_visit_date : null, assignees,
-        clean(input.internal_notes), actorId,
+        number,
+        input.relation_id,
+        input.title.trim().slice(0, 255),
+        clean(input.description),
+        address?.street ?? null,
+        address?.house_number ?? null,
+        address?.postcode ?? null,
+        address?.city ?? null,
+        address?.country ?? null,
+        input.amount_excl_vat,
+        vatCode,
+        input.billing_interval,
+        input.start_date,
+        input.end_date ?? null,
+        dayOfMonth(input.start_date),
+        input.payment_term_days ?? 14,
+        input.use_direct_debit ?? true,
+        input.language ?? toLanguage(relation.preferred_language),
+        visitsPerYear,
+        visitsPerYear > 0 ? input.first_visit_date : null,
+        assignees,
+        clean(input.internal_notes),
+        actorId,
       ],
     );
     const created = inserted.rows[0];
-    await logContractEvent(created, "SUBSCRIPTION_CREATED", `Maintenance contract ${created.number} created`, actorId, { interval: input.billing_interval }, client);
-    await logAudit({ actor_id: actorId, action: "CREATE", entity_type: "subscription", entity_id: created.id, changes: { number: created.number, amount_excl_vat: input.amount_excl_vat } }, client);
+    await logContractEvent(
+      created,
+      "SUBSCRIPTION_CREATED",
+      `Maintenance contract ${created.number} created`,
+      actorId,
+      { interval: input.billing_interval },
+      client,
+    );
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "CREATE",
+        entity_type: "subscription",
+        entity_id: created.id,
+        changes: {
+          number: created.number,
+          amount_excl_vat: input.amount_excl_vat,
+        },
+      },
+      client,
+    );
     return created.id as string;
   });
   return getById(id);
 };
 
-const updateContract = async (id: string, input: IUpdateContract, actorId: string) => {
+const updateContract = async (
+  id: string,
+  input: IUpdateContract,
+  actorId: string,
+) => {
   const current = await loadContract(id);
-  if (current.status === "ENDED") throw new ApiError(httpStatus.CONFLICT, "An ended contract cannot be changed!");
+  if (current.status === "ENDED")
+    throw new ApiError(
+      httpStatus.CONFLICT,
+      "An ended contract cannot be changed!",
+    );
 
   const updates: string[] = [];
   const values: any[] = [];
@@ -310,50 +466,122 @@ const updateContract = async (id: string, input: IUpdateContract, actorId: strin
   };
   const changes: Record<string, any> = {};
 
-  if (input.title !== undefined) { set("title", input.title.trim().slice(0, 255)); changes.title = input.title; }
-  if (input.description !== undefined) set("description", clean(input.description));
-  if (input.internal_notes !== undefined) set("internal_notes", clean(input.internal_notes));
-  if (input.amount_excl_vat !== undefined) { set("amount_excl_vat", input.amount_excl_vat); changes.amount_excl_vat = { from: current.amount_excl_vat, to: input.amount_excl_vat }; }
-  if (input.vat_code !== undefined) { await assertVatCode(input.vat_code); set("vat_code", input.vat_code); changes.vat_code = input.vat_code; }
-  if (input.billing_interval !== undefined) { set("billing_interval", input.billing_interval); changes.billing_interval = { from: current.billing_interval, to: input.billing_interval }; }
-  if (input.payment_term_days !== undefined) set("payment_term_days", input.payment_term_days);
-  if (input.use_direct_debit !== undefined) { set("use_direct_debit", input.use_direct_debit); changes.use_direct_debit = input.use_direct_debit; }
-  if (input.language !== undefined) set("language", input.language, `::"Language"`);
+  if (input.title !== undefined) {
+    set("title", input.title.trim().slice(0, 255));
+    changes.title = input.title;
+  }
+  if (input.description !== undefined)
+    set("description", clean(input.description));
+  if (input.internal_notes !== undefined)
+    set("internal_notes", clean(input.internal_notes));
+  if (input.amount_excl_vat !== undefined) {
+    set("amount_excl_vat", input.amount_excl_vat);
+    changes.amount_excl_vat = {
+      from: current.amount_excl_vat,
+      to: input.amount_excl_vat,
+    };
+  }
+  if (input.vat_code !== undefined) {
+    await assertVatCode(input.vat_code);
+    set("vat_code", input.vat_code);
+    changes.vat_code = input.vat_code;
+  }
+  if (input.billing_interval !== undefined) {
+    set("billing_interval", input.billing_interval);
+    changes.billing_interval = {
+      from: current.billing_interval,
+      to: input.billing_interval,
+    };
+  }
+  if (input.payment_term_days !== undefined)
+    set("payment_term_days", input.payment_term_days);
+  if (input.use_direct_debit !== undefined) {
+    set("use_direct_debit", input.use_direct_debit);
+    changes.use_direct_debit = input.use_direct_debit;
+  }
+  if (input.language !== undefined)
+    set("language", input.language, `::"Language"`);
   if (input.end_date !== undefined) {
     if (input.end_date !== null) {
       assertDay(input.end_date, "End date");
-      if (input.end_date < current.start_date) throw new ApiError(httpStatus.BAD_REQUEST, "The end date cannot be before the start date!");
-      if (input.end_date < amsterdamToday()) throw new ApiError(httpStatus.BAD_REQUEST, "The end date cannot be in the past. End the contract instead!");
+      if (input.end_date < current.start_date)
+        throw new ApiError(
+          httpStatus.BAD_REQUEST,
+          "The end date cannot be before the start date!",
+        );
+      if (input.end_date < amsterdamToday())
+        throw new ApiError(
+          httpStatus.BAD_REQUEST,
+          "The end date cannot be in the past. End the contract instead!",
+        );
     }
     set("end_date", input.end_date, "::date");
     changes.end_date = input.end_date;
   }
   if (input.address !== undefined) {
     const a = input.address ? normalizeAddress(input.address) : null;
-    set("street", a?.street ?? null); set("house_number", a?.house_number ?? null); set("postcode", a?.postcode ?? null);
-    set("city", a?.city ?? null); set("country", a?.country ?? "NL");
+    set("street", a?.street ?? null);
+    set("house_number", a?.house_number ?? null);
+    set("postcode", a?.postcode ?? null);
+    set("city", a?.city ?? null);
+    set("country", a?.country ?? "NL");
   }
 
   // Visits: the schedule is worked out from these, so a change only affects visits not made yet
   const visitsPerYear = input.visits_per_year ?? current.visits_per_year;
-  const firstVisit = input.first_visit_date !== undefined ? input.first_visit_date : current.first_visit_date;
-  if (input.visits_per_year !== undefined || input.first_visit_date !== undefined) {
-    if (visitsPerYear > 0 && !firstVisit) throw new ApiError(httpStatus.BAD_REQUEST, "The first visit date is required when visits are planned!");
+  const firstVisit =
+    input.first_visit_date !== undefined
+      ? input.first_visit_date
+      : current.first_visit_date;
+  if (
+    input.visits_per_year !== undefined ||
+    input.first_visit_date !== undefined
+  ) {
+    if (visitsPerYear > 0 && !firstVisit)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "The first visit date is required when visits are planned!",
+      );
     if (firstVisit) assertDay(firstVisit, "First visit date");
     set("visits_per_year", visitsPerYear);
     set("first_visit_date", visitsPerYear > 0 ? firstVisit : null, "::date");
     changes.visits_per_year = visitsPerYear;
   }
-  if (input.visit_assignee_ids !== undefined) set("visit_assignee_ids", await assertVisitAssignees(input.visit_assignee_ids), "::uuid[]");
+  if (input.visit_assignee_ids !== undefined)
+    set(
+      "visit_assignee_ids",
+      await assertVisitAssignees(input.visit_assignee_ids),
+      "::uuid[]",
+    );
 
-  if (updates.length === 0) throw new ApiError(httpStatus.BAD_REQUEST, "No fields to update");
+  if (updates.length === 0)
+    throw new ApiError(httpStatus.BAD_REQUEST, "No fields to update");
   updates.push("updated_at = CURRENT_TIMESTAMP");
   values.push(id);
 
   await transaction(async (client) => {
-    await client.query(`UPDATE subscriptions SET ${updates.join(", ")} WHERE id = $${values.length}::uuid`, values);
-    await logContractEvent(current, "SUBSCRIPTION_UPDATED", `Maintenance contract ${current.number} changed (applies from the next billing date)`, actorId, { changes }, client);
-    await logAudit({ actor_id: actorId, action: "UPDATE", entity_type: "subscription", entity_id: id, changes }, client);
+    await client.query(
+      `UPDATE subscriptions SET ${updates.join(", ")} WHERE id = $${values.length}::uuid`,
+      values,
+    );
+    await logContractEvent(
+      current,
+      "SUBSCRIPTION_UPDATED",
+      `Maintenance contract ${current.number} changed (applies from the next billing date)`,
+      actorId,
+      { changes },
+      client,
+    );
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "UPDATE",
+        entity_type: "subscription",
+        entity_id: id,
+        changes,
+      },
+      client,
+    );
   });
   return getById(id);
 };
@@ -370,17 +598,41 @@ const lock = async (client: any, id: string) => {
      FROM subscriptions WHERE id = $1::uuid FOR UPDATE`,
     [id],
   );
-  if (r.rows.length === 0) throw new ApiError(httpStatus.NOT_FOUND, "Subscription not found!");
+  if (r.rows.length === 0)
+    throw new ApiError(httpStatus.NOT_FOUND, "Subscription not found!");
   return r.rows[0];
 };
 
 const pauseContract = async (id: string, actorId: string) => {
   await transaction(async (client) => {
     const c = await lock(client, id);
-    if (c.status !== "ACTIVE") throw new ApiError(httpStatus.CONFLICT, "Only an active contract can be paused!");
-    await client.query(`UPDATE subscriptions SET status = 'PAUSED', paused_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1::uuid`, [id]);
-    await logContractEvent(c, "SUBSCRIPTION_PAUSED", `Maintenance contract ${c.number} paused`, actorId, {}, client);
-    await logAudit({ actor_id: actorId, action: "UPDATE", entity_type: "subscription", entity_id: id, changes: { status: "PAUSED" } }, client);
+    if (c.status !== "ACTIVE")
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        "Only an active contract can be paused!",
+      );
+    await client.query(
+      `UPDATE subscriptions SET status = 'PAUSED', paused_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1::uuid`,
+      [id],
+    );
+    await logContractEvent(
+      c,
+      "SUBSCRIPTION_PAUSED",
+      `Maintenance contract ${c.number} paused`,
+      actorId,
+      {},
+      client,
+    );
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "UPDATE",
+        entity_type: "subscription",
+        entity_id: id,
+        changes: { status: "PAUSED" },
+      },
+      client,
+    );
   });
   return getById(id);
 };
@@ -389,7 +641,11 @@ const pauseContract = async (id: string, actorId: string) => {
 const resumeContract = async (id: string, actorId: string) => {
   const skipped = await transaction(async (client) => {
     const c = await lock(client, id);
-    if (c.status !== "PAUSED") throw new ApiError(httpStatus.CONFLICT, "Only a paused contract can be resumed!");
+    if (c.status !== "PAUSED")
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        "Only a paused contract can be resumed!",
+      );
     const today = amsterdamToday();
     let next = c.next_billing_date as string;
     let skippedPeriods = 0;
@@ -401,8 +657,24 @@ const resumeContract = async (id: string, actorId: string) => {
       `UPDATE subscriptions SET status = 'ACTIVE', paused_at = NULL, next_billing_date = $2::date, updated_at = CURRENT_TIMESTAMP WHERE id = $1::uuid`,
       [id, next],
     );
-    await logContractEvent(c, "SUBSCRIPTION_RESUMED", `Maintenance contract ${c.number} resumed (next billing date ${next})`, actorId, { next_billing_date: next, skipped_periods: skippedPeriods }, client);
-    await logAudit({ actor_id: actorId, action: "UPDATE", entity_type: "subscription", entity_id: id, changes: { status: "ACTIVE", next_billing_date: next } }, client);
+    await logContractEvent(
+      c,
+      "SUBSCRIPTION_RESUMED",
+      `Maintenance contract ${c.number} resumed (next billing date ${next})`,
+      actorId,
+      { next_billing_date: next, skipped_periods: skippedPeriods },
+      client,
+    );
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "UPDATE",
+        entity_type: "subscription",
+        entity_id: id,
+        changes: { status: "ACTIVE", next_billing_date: next },
+      },
+      client,
+    );
     return skippedPeriods;
   });
   return { ...(await getById(id)), skipped_periods: skipped };
@@ -411,17 +683,36 @@ const resumeContract = async (id: string, actorId: string) => {
 // The end date is the last day the contract runs: a billing period that starts on or before it is
 // still billed, none after. It becomes ENDED at once when nothing more is to be billed, otherwise
 // when the billing job has made the last invoice.
-const endContract = async (id: string, input: IEndContract, actorId: string) => {
+const endContract = async (
+  id: string,
+  input: IEndContract,
+  actorId: string,
+) => {
   await transaction(async (client) => {
     const c = await lock(client, id);
-    if (c.status === "ENDED") throw new ApiError(httpStatus.CONFLICT, "This contract has already ended!");
+    if (c.status === "ENDED")
+      throw new ApiError(
+        httpStatus.CONFLICT,
+        "This contract has already ended!",
+      );
     const today = amsterdamToday();
     const endDate = input.end_date ?? today;
     assertDay(endDate, "End date");
-    if (endDate < c.start_date) throw new ApiError(httpStatus.BAD_REQUEST, "The end date cannot be before the start date!");
-    if (endDate < today) throw new ApiError(httpStatus.BAD_REQUEST, "The end date cannot be in the past!");
+    if (endDate < c.start_date)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "The end date cannot be before the start date!",
+      );
+    if (endDate < today)
+      throw new ApiError(
+        httpStatus.BAD_REQUEST,
+        "The end date cannot be in the past!",
+      );
 
-    const nothingMoreToBill = c.status === "PAUSED" || !c.next_billing_date || c.next_billing_date > endDate;
+    const nothingMoreToBill =
+      c.status === "PAUSED" ||
+      !c.next_billing_date ||
+      c.next_billing_date > endDate;
     await client.query(
       `UPDATE subscriptions
        SET end_date = $2::date, end_reason = $3,
@@ -432,12 +723,40 @@ const endContract = async (id: string, input: IEndContract, actorId: string) => 
        WHERE id = $1::uuid`,
       [id, endDate, clean(input.reason), nothingMoreToBill],
     );
-    await logContractEvent(c, "SUBSCRIPTION_ENDED", `Maintenance contract ${c.number} ${nothingMoreToBill ? "ended" : `ends on ${endDate}`}`, actorId, { end_date: endDate, reason: clean(input.reason) }, client);
-    await logAudit({ actor_id: actorId, action: "UPDATE", entity_type: "subscription", entity_id: id, changes: { end_date: endDate, status: nothingMoreToBill ? "ENDED" : c.status } }, client);
+    await logContractEvent(
+      c,
+      "SUBSCRIPTION_ENDED",
+      `Maintenance contract ${c.number} ${nothingMoreToBill ? "ended" : `ends on ${endDate}`}`,
+      actorId,
+      { end_date: endDate, reason: clean(input.reason) },
+      client,
+    );
+    await logAudit(
+      {
+        actor_id: actorId,
+        action: "UPDATE",
+        entity_type: "subscription",
+        entity_id: id,
+        changes: {
+          end_date: endDate,
+          status: nothingMoreToBill ? "ENDED" : c.status,
+        },
+      },
+      client,
+    );
   });
   return getById(id);
 };
 
 export const ContractService = {
-  getAll, getById, getInvoices, getHistory, getSummary, createContract, updateContract, pauseContract, resumeContract, endContract,
+  getAll,
+  getById,
+  getInvoices,
+  getHistory,
+  getSummary,
+  createContract,
+  updateContract,
+  pauseContract,
+  resumeContract,
+  endContract,
 };

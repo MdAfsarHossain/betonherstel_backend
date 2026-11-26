@@ -5,6 +5,7 @@ import { addDays } from "../../utils/dates";
 import { query } from "../../utils/db";
 import { RelationService } from "../relation/relation.service";
 import { TBillingInterval } from "./contract.interface";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Pieces shared by the contract services: calendar maths on billing dates, and a loader.
 
@@ -92,7 +93,7 @@ export const loadCustomer = async (relationId: string) => {
 
 export const logContractEvent = (
   contract: { id: string; relation_id: string; number: string },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   metadata: Record<string, any> = {},
