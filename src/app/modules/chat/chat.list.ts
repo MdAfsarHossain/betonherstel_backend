@@ -4,7 +4,7 @@ import { channelLabels, IChatUser } from "./chat.interface";
 import { isExternal, isStaff, unreadSql } from "./chat.shared";
 
 // The chat list: which channels a person may see, and what the list shows for each project. One builder
-// is used for `GET /chat/projects` and for the live `chat:list` push, so the two can never differ.
+// is used for `GET /chat/projects` and for the live `chat:chat` push (type "project"), so the two can never differ.
 
 // Which channels a person may see, as SQL. $1 = their id, $2 = their relation.
 export const visibility = (user: IChatUser) =>
@@ -74,7 +74,7 @@ export const channelRows = async (user: IChatUser, projectIds: string[]) => {
 export const projectListItems = async (user: IChatUser, projectIds: string[]) => {
   if (projectIds.length === 0) return [];
   const [projects, channels] = await Promise.all([
-    query(`SELECT id, number, title FROM projects WHERE id = ANY($1::uuid[])`, [projectIds]),
+    query(`SELECT id, number, title, created_at FROM projects WHERE id = ANY($1::uuid[])`, [projectIds]),
     channelRows(user, projectIds),
   ]);
   const items: any[] = [];
@@ -83,10 +83,21 @@ export const projectListItems = async (user: IChatUser, projectIds: string[]) =>
     const mine = channels.filter((c: any) => c.project_id === id);
     if (!p || mine.length === 0) continue;
     const times = mine.map((c: any) => c.last_message?.createdAt).filter(Boolean).map((t: any) => new Date(t).getTime());
+    // the newest message over the project's channels is the one the list shows
+    const newest = mine
+      .filter((c: any) => c.last_message?.createdAt)
+      .sort((a: any, b: any) => +new Date(b.last_message.createdAt) - +new Date(a.last_message.createdAt))[0];
     items.push({
+      type: "project",
+      id: p.id,
+      title: `${p.number} ${p.title}`,
       project: { id: p.id, number: p.number, title: p.title },
       unread: mine.reduce((n: number, c: any) => n + c.unread, 0),
       last_message_at: times.length ? new Date(Math.max(...times)).toISOString() : null,
+      // when the entry was last "alive": its newest message, or its creation when it is newer (a new chat is first)
+      activity_at: new Date(Math.max(+new Date(p.created_at), ...times)).toISOString(),
+      last_message: newest?.last_message ?? null,
+      createdAt: p.created_at,
       channels: mine.map(({ project_id, ...c }: any) => c),
     });
   }
@@ -100,9 +111,13 @@ const paged = (rows: any[], total: number, page: number, limit: number) => {
 
 // A person's whole chat list, one page: every project they may chat on, the project with the newest
 // message first (projects nobody has written in yet come after, newest project first). Used by
-// `GET /chat/projects` and by the live `chat:projects` push, so both always show the same order.
-export const listProjects = async (user: IChatUser, params: Record<string, any>) => {
-  const { page, limit, skip } = paginationHelper.calculatePagination(params as any);
+// `GET /chat/projects` and (merged with the staff chats) by `GET /chat/list` and the live `chat:chats` push, so both always show the same order.
+// `window` replaces page / limit with an exact slice (the merged chat list needs the first N of each source)
+export const listProjects = async (user: IChatUser, params: Record<string, any>, window?: { limit: number; skip: number }) => {
+  const pagination = paginationHelper.calculatePagination(params as any);
+  const { page } = pagination;
+  const limit = window?.limit ?? pagination.limit;
+  const skip = window?.skip ?? pagination.skip;
 
   const values: any[] = [user.id, user.relation_id];
   let search = "";
@@ -123,7 +138,7 @@ export const listProjects = async (user: IChatUser, params: Record<string, any>)
       `
         SELECT v.project_id, MAX(v.last_at) AS last_at, SUM(v.unread)::int AS unread
         FROM (${visible}) v GROUP BY v.project_id ${having}
-        ORDER BY MAX(v.last_at) DESC NULLS LAST, MAX(v.project_created_at) DESC, v.project_id
+        ORDER BY GREATEST(MAX(v.last_at), MAX(v.project_created_at)) DESC, v.project_id
         LIMIT $${values.length + 1} OFFSET $${values.length + 2}
       `,
       [...values, limit, skip],

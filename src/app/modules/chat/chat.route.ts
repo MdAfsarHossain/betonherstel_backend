@@ -18,6 +18,8 @@ const everyone = auth(
   "SUBCONTRACTOR",
 );
 const staff = auth("SUPERADMIN", "ADMIN", "OFFICE");
+// Staff chats (one-to-one and groups) are for employees only
+const employees = auth("SUPERADMIN", "ADMIN", "OFFICE", "FIELD");
 
 // A person can send this many messages a minute (counted per person, not per address)
 const sendLimiter = rateLimit({
@@ -40,6 +42,38 @@ route.get(
   ChatController.getProjectChannels,
 );
 route.get("/unread", everyone, ChatController.getUnreadSummary);
+// ONE list of everything I can chat in: entries have type "project", "single" or "group"
+route.get("/list", everyone, ChatController.getChats);
+// Open one chat of any type: /chat/conversations/project/<project id>, /chat/conversations/single/<id>, /chat/conversations/group/<id>
+route.get("/conversations/:type/:id", everyone, ChatController.getChatEntry);
+
+// Staff chats: employees talk to each other, one-to-one or in a named group. Private to their members.
+route.get("/people", employees, ChatController.getPeople);
+// One endpoint: { type: "single", user_id } or { type: "group", title, member_ids }
+route.post(
+  "/conversations",
+  employees,
+  validateRequest(ChatValidation.createConversation),
+  ChatController.createConversation,
+);
+route.get("/conversations/:id", employees, ChatController.getConversation);
+route.patch(
+  "/conversations/:id",
+  employees,
+  validateRequest(ChatValidation.renameGroup),
+  ChatController.renameGroup,
+);
+route.post(
+  "/conversations/:id/members",
+  employees,
+  validateRequest(ChatValidation.addMember),
+  ChatController.addConversationMember,
+);
+route.delete(
+  "/conversations/:id/members/:userId",
+  employees,
+  ChatController.removeConversationMember,
+);
 
 route.get("/channels/:id/messages", everyone, ChatController.getMessages);
 route.post(
