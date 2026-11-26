@@ -1,5 +1,5 @@
 import z from "zod";
-import { MAX_BODY_LENGTH } from "./chat.interface";
+import { MAX_BODY_LENGTH, MAX_GROUP_MEMBERS } from "./chat.interface";
 
 const uuid = (label: string) =>
   z.string().uuid({ message: `Invalid ${label}!` });
@@ -42,4 +42,45 @@ const addMember = z.object({
   body: z.object({ user_id: uuid("user id") }),
 });
 
-export const ChatValidation = { sendMessage, editMessage, addMember };
+const groupTitle = z
+  .string({ error: "A group needs a name!" })
+  .trim()
+  .min(1, "A group needs a name!")
+  .max(120, "A group name can be at most 120 characters!");
+
+// Staff chats: ONE endpoint starts either a one-to-one chat ("single") or a named group ("group")
+const createConversation = z.object({
+  body: z.discriminatedUnion(
+    "type",
+    [
+      z.object({
+        type: z.literal("single"),
+        user_id: uuid("user id"),
+      }),
+      z.object({
+        type: z.literal("group"),
+        title: groupTitle,
+        member_ids: z
+          .array(uuid("user id"), { error: "Choose the people for the group!" })
+          .min(1, "Choose at least one other person!")
+          .max(
+            MAX_GROUP_MEMBERS - 1,
+            `A group can have at most ${MAX_GROUP_MEMBERS} people!`,
+          ),
+      }),
+    ],
+    { error: 'type should be "single" or "group"!' },
+  ),
+});
+
+const renameGroup = z.object({
+  body: z.object({ title: groupTitle }),
+});
+
+export const ChatValidation = {
+  sendMessage,
+  editMessage,
+  addMember,
+  createConversation,
+  renameGroup,
+};

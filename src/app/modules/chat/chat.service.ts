@@ -15,6 +15,7 @@ import {
   EMAIL_EVERY_MINUTES,
   IChatChannel,
   IChatUser,
+  isConversationKind,
   MAX_BODY_LENGTH,
   MAX_FILES_PER_MESSAGE,
 } from "./chat.interface";
@@ -25,6 +26,7 @@ import {
   channelTitle,
   ensureChannels,
   isAdmin,
+  isEmployee,
   isExternal,
   isStaff,
   loadChannel,
@@ -38,7 +40,9 @@ import {
   unreadSql,
 } from "./chat.shared";
 import { channelRows, listProjects, visibility } from "./chat.list";
-import { pushChatList } from "./chat.live";
+import { getChat, listChats } from "./chat.chats";
+import { pushChannelList } from "./chat.live";
+import { conversationUnread } from "./chat.conversations.list";
 import { presenceOf, stopTyping, dropUserFromChannel } from "./chat.presence";
 
 // Project chat (real time). REST is the write path: it saves, then pushes what was saved to
@@ -59,6 +63,13 @@ const paged = (rows: any[], total: number, page: number, limit: number) => {
     },
   };
 };
+
+// Everything I can chat in as ONE list (projects, one-to-one staff chats, staff groups), newest message first
+const getChats = async (userId: string, params: Record<string, any>) =>
+  listChats(await loadChatUser(userId), params);
+
+// Open one chat of any type: a project, a one-to-one staff chat or a staff group
+const getChatEntry = async (userId: string, type: string, id: string) => getChat(await loadChatUser(userId), type, id);
 
 // My projects with their chats, most recent activity first
 const getProjects = async (userId: string, params: Record<string, any>) =>
@@ -99,7 +110,15 @@ const getUnreadSummary = async (userId: string) => {
      FROM (SELECT ${unreadSql("c.id", "$1")} AS unread FROM chat_channels c JOIN projects p ON p.id = c.project_id WHERE ${visibility(user)}) x`,
     [user.id, user.relation_id],
   );
-  return r.rows[0];
+  // Staff chats (DIRECT / GROUP) count too, for employees
+  const conversations = isEmployee(user.role)
+    ? await conversationUnread(user.id)
+    : { unread: 0, with_unread: 0 };
+  return {
+    ...r.rows[0],
+    conversations,
+    total_unread: r.rows[0].unread + conversations.unread,
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -127,7 +146,11 @@ const tsText = `to_char(m.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:S
 // messages of a page come oldest first, ready to show.
 // Who has read each message (read receipts). A person has read a message when they marked the channel read
 // after it was sent, so this comes from `chat_reads`. The author never counts as a reader of their own message.
-const withReceipts = async (channelId: string, rows: any[], viewer: { id: string; external: boolean }) => {
+const withReceipts = async (
+  channelId: string,
+  rows: any[],
+  viewer: { id: string; external: boolean },
+) => {
   const readers = await query(
     `SELECT r.user_id, u.name, u.role::text AS role, r.last_read_at
      FROM chat_reads r JOIN users u ON u.id = r.user_id
@@ -139,8 +162,17 @@ const withReceipts = async (channelId: string, rows: any[], viewer: { id: string
     if (message.deleted) return message;
     const created = +new Date(row.createdAt);
     message.read_by = readers.rows
-      .filter((r: any) => r.user_id !== row.author_id && +new Date(r.last_read_at) >= created)
-      .map((r: any) => ({ ...shapePerson({ id: r.user_id, name: r.name, role: r.role }, viewer.external), read_at: r.last_read_at }));
+      .filter(
+        (r: any) =>
+          r.user_id !== row.author_id && +new Date(r.last_read_at) >= created,
+      )
+      .map((r: any) => ({
+        ...shapePerson(
+          { id: r.user_id, name: r.name, role: r.role },
+          viewer.external,
+        ),
+        read_at: r.last_read_at,
+      }));
     return message;
   });
 };
@@ -182,11 +214,14 @@ const getMessages = async (
       kind: channel.kind,
       label: channelLabels[channel.kind],
       read_only: channel.read_only,
-      project: {
-        id: channel.project_id,
-        number: channel.project_number,
-        title: channel.project_title,
-      },
+      title: channel.title,
+      project: channel.project_id
+        ? {
+            id: channel.project_id,
+            number: channel.project_number,
+            title: channel.project_title,
+          }
+        : null,
     },
   };
 };
@@ -225,6 +260,7 @@ const afterSend = async (
       emitToUser(person.id, "chat:message", {
         channel_id: channel.id,
         project_id: channel.project_id,
+        channel_kind: channel.kind,
         message: shapeMessage(row, viewer),
       });
       if (person.id !== actor.id) await pushChatUnread(channel, person.id);
@@ -232,7 +268,10 @@ const afterSend = async (
     // Sending ends the sender's "typing"
     await stopTyping(actor.id, channel.id);
     // The chat list of every person in the channel (last message, unread, order)
-    await pushChatList(audience.map((a) => a.id), channel.project_id);
+    await pushChannelList(
+      channel,
+      audience.map((a) => a.id),
+    );
 
     // 2. Employees: one in-app notification per channel until they read it (not one per message)
     const staffIds = audience
@@ -241,13 +280,17 @@ const afterSend = async (
     const crewIds = audience
       .filter((a) => a.source === "planned" || a.source === "added")
       .map((a) => a.id);
+    const conversation = isConversationKind(channel.kind);
     const recipients = new Set<string>(crewIds);
     const manager =
       channel.project_manager_id &&
       staffIds.includes(channel.project_manager_id)
         ? channel.project_manager_id
         : null;
-    if (manager) recipients.add(manager);
+    if (conversation) {
+      // a staff chat: everyone in it except the sender
+      audience.forEach((a) => recipients.add(a.id));
+    } else if (manager) recipients.add(manager);
     else if (!isStaff(actor.role)) staffIds.forEach((id) => recipients.add(id));
     recipients.delete(actor.id);
     if (recipients.size > 0) {
@@ -260,10 +303,19 @@ const afterSend = async (
       if (fresh.length > 0) {
         await notify(fresh, {
           type: "CHAT_MESSAGE",
-          title: `${actor.name} wrote in ${channelTitle(channel)}`,
+          title:
+            channel.kind === "DIRECT"
+              ? `${actor.name} sent you a message`
+              : `${actor.name} wrote in ${channelTitle(channel)}`,
           body: bodyText || (hasFiles ? "Sent a file" : null),
-          entity: { type: "project", id: channel.project_id },
-          data: { channel_id: channel.id, message_id: messageId },
+          ...(channel.project_id
+            ? { entity: { type: "project", id: channel.project_id } }
+            : {}),
+          data: {
+            channel_id: channel.id,
+            message_id: messageId,
+            kind: channel.kind,
+          },
           actorId: actor.id,
         });
       }
@@ -302,9 +354,9 @@ const afterSend = async (
           name: person.name,
           project: `${channel.project_number} ${channel.project_title}`,
           message: preview,
-          link: `${config.frontend_url}/portal/projects/${channel.project_id}/chat`,
+          link: `${config.frontend_url}/portal/projects/${channel.project_id as string}/chat`,
         },
-        related: { type: "project", id: channel.project_id },
+        related: { type: "project", id: channel.project_id as string },
       }).catch(() => undefined);
     }
   } catch (error: any) {
@@ -324,6 +376,11 @@ const sendMessage = async (
 
   const body = (input.body ?? "").trim();
   const fileList = files ?? [];
+  if (!channel.project_id && fileList.length > 0)
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "Files are not available in staff chats yet!",
+    );
   if (!body && fileList.length === 0)
     throw new ApiError(
       httpStatus.BAD_REQUEST,
@@ -363,7 +420,7 @@ const sendMessage = async (
     try {
       // Same checks as every project file (real type from the bytes, 10 MB). Never "shared": only this channel sees it.
       await ProjectService.addFiles(
-        channel.project_id,
+        channel.project_id as string,
         fileList,
         { folder: "GENERAL" },
         user.id,
@@ -432,7 +489,10 @@ const editMessage = async (userId: string, messageId: string, body: string) => {
     });
   }
   // an edited last message changes the preview in the list
-  await pushChatList((await audienceOf(channel)).map((a) => a.id), channel.project_id);
+  await pushChannelList(
+    channel,
+    (await audienceOf(channel)).map((a) => a.id),
+  );
   return shapeMessage(row, { id: user.id, external: isExternal(user.role) });
 };
 
@@ -457,20 +517,30 @@ const deleteMessage = async (userId: string, messageId: string) => {
     });
     await pushChatUnread(channel, person.id);
   }
-  await pushChatList((await audienceOf(channel)).map((a) => a.id), channel.project_id);
+  await pushChannelList(
+    channel,
+    (await audienceOf(channel)).map((a) => a.id),
+  );
   return { id: messageId, deleted: true };
 };
 
 // Read receipt, live: everyone in the channel learns that this person has now read it (up to `read_at`).
 // The reader's own tabs hear nothing (they get chat:unread). Never throws: the read mark is already saved.
-const pushReadReceipt = async (channel: IChatChannel, reader: IChatUser, readAt: Date) => {
+const pushReadReceipt = async (
+  channel: IChatChannel,
+  reader: IChatUser,
+  readAt: Date,
+) => {
   try {
     for (const person of await audienceOf(channel)) {
       if (person.id === reader.id) continue;
       emitToUser(person.id, "chat:read", {
         channel_id: channel.id,
         project_id: channel.project_id,
-        reader: shapePerson({ id: reader.id, name: reader.name, role: reader.role }, isExternal(person.role)),
+        reader: shapePerson(
+          { id: reader.id, name: reader.name, role: reader.role },
+          isExternal(person.role),
+        ),
         read_at: new Date(readAt).toISOString(),
       });
     }
@@ -492,9 +562,12 @@ const markRead = async (userId: string, channelId: string) => {
     `UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE user_id = $1::uuid AND type = 'CHAT_MESSAGE' AND read_at IS NULL AND data->>'channel_id' = $2 RETURNING id`,
     [user.id, channel.id],
   );
-  if (cleared.rows.length > 0) await pushUnreadCount(user.id, { read: cleared.rows.map((r: any) => r.id) });
+  if (cleared.rows.length > 0)
+    await pushUnreadCount(user.id, {
+      read: cleared.rows.map((r: any) => r.id),
+    });
   await pushChatUnread(channel, user.id);
-  await pushChatList([user.id], channel.project_id);
+  await pushChannelList(channel, [user.id]);
   await pushReadReceipt(channel, user, marked.rows[0].last_read_at);
   return { channel_id: channel.id, unread: 0 };
 };
@@ -512,6 +585,8 @@ const requireStaff = async (userId: string) => {
 const getMembers = async (userId: string, channelId: string) => {
   await requireStaff(userId);
   const channel = await loadChannel(channelId);
+  // a staff chat is private to its members: its member list is not for office or admin to read
+  if (isConversationKind(channel.kind)) throw notFound();
   return (await audienceOf(channel)).map(({ id, name, role, source }) => ({
     id,
     name,
@@ -528,6 +603,7 @@ const addMember = async (
 ) => {
   const actor = await requireStaff(userId);
   const channel = await loadChannel(channelId);
+  if (isConversationKind(channel.kind)) throw notFound();
   if (channel.kind === "SUBCONTRACTOR")
     throw new ApiError(
       httpStatus.BAD_REQUEST,
@@ -555,7 +631,7 @@ const addMember = async (
   emitToUser(memberId, "chat:channels_changed", {
     project_id: channel.project_id,
   });
-  await pushChatList([memberId], channel.project_id);
+  await pushChannelList(channel, [memberId]);
   return getMembers(userId, channelId);
 };
 
@@ -567,6 +643,7 @@ const removeMember = async (
 ) => {
   await requireStaff(userId);
   const channel = await loadChannel(channelId);
+  if (isConversationKind(channel.kind)) throw notFound();
   assertUuid(memberId, "user id");
   const removed = await query(
     `DELETE FROM chat_members WHERE channel_id = $1::uuid AND user_id = $2::uuid RETURNING user_id`,
@@ -580,9 +657,11 @@ const removeMember = async (
   emitToUser(memberId, "chat:channels_changed", {
     project_id: channel.project_id,
   });
-  await pushChatList([memberId], channel.project_id);
+  await pushChannelList(channel, [memberId]);
   // they may no longer watch the channel for typing and presence (unless the planning still gives it to them)
-  const stillAllowed = await loadChatUser(memberId).then((u) => canAccess(u, channel)).catch(() => false);
+  const stillAllowed = await loadChatUser(memberId)
+    .then((u) => canAccess(u, channel))
+    .catch(() => false);
   if (!stillAllowed) await dropUserFromChannel(memberId, channel.id);
   return getMembers(userId, channelId);
 };
@@ -595,6 +674,8 @@ const getPresence = async (userId: string, channelId: string) => {
 };
 
 export const ChatService = {
+  getChats,
+  getChatEntry,
   getProjects,
   getProjectChannels,
   getUnreadSummary,

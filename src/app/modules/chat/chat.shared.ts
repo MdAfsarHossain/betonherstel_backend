@@ -4,7 +4,7 @@ import { emitToUser } from "../../lib/realtime";
 import assertUuid from "../../utils/assertUuid";
 import { query } from "../../utils/db";
 import {
-  adminRoles, channelLabels, externalRoles, IChatChannel, IChatUser, READ_ONLY_AFTER_DAYS, roleLabels, staffRoles,
+  adminRoles, channelLabels, employeeRoles, externalRoles, IChatChannel, IChatUser, isConversationKind, READ_ONLY_AFTER_DAYS, roleLabels, staffRoles,
 } from "./chat.interface";
 
 // Who may see which channel, and the pieces every chat service shares. `canAccess` is THE rule:
@@ -13,6 +13,8 @@ import {
 export const isStaff = (role: string) => (staffRoles as readonly string[]).includes(role);
 export const isAdmin = (role: string) => (adminRoles as readonly string[]).includes(role);
 export const isExternal = (role: string) => (externalRoles as readonly string[]).includes(role);
+// Everyone who works for the company: Admin, Office and Field crew (the only people in staff chats)
+export const isEmployee = (role: string) => (employeeRoles as readonly string[]).includes(role);
 
 export const loadChatUser = async (userId: string): Promise<IChatUser> => {
   const found = await query(`SELECT id, name, role::text AS role, relation_id FROM users WHERE id = $1::uuid`, [userId]);
@@ -21,11 +23,11 @@ export const loadChatUser = async (userId: string): Promise<IChatUser> => {
 };
 
 const channelSelect = `
-  SELECT c.id, c.project_id, c.kind, c.relation_id,
+  SELECT c.id, c.project_id, c.kind, c.relation_id, c.title, c.created_by,
          p.number AS project_number, p.title AS project_title, p.relation_id AS customer_relation_id,
          p.project_manager_id,
-         (p.closed_at IS NOT NULL AND p.closed_at < CURRENT_TIMESTAMP - make_interval(days => ${READ_ONLY_AFTER_DAYS})) AS read_only
-  FROM chat_channels c JOIN projects p ON p.id = c.project_id
+         COALESCE(p.closed_at IS NOT NULL AND p.closed_at < CURRENT_TIMESTAMP - make_interval(days => ${READ_ONLY_AFTER_DAYS}), false) AS read_only
+  FROM chat_channels c LEFT JOIN projects p ON p.id = c.project_id
 `;
 
 export const notFound = () => new ApiError(httpStatus.NOT_FOUND, "Chat not found!");
@@ -57,13 +59,15 @@ const isAddedMember = async (userId: string, channelId: string) => {
 };
 
 export const canAccess = async (user: IChatUser, channel: IChatChannel): Promise<boolean> => {
+  // A staff conversation is private to its members: being office or admin gives no access to it
+  if (isConversationKind(channel.kind)) return isEmployee(user.role) && (await isAddedMember(user.id, channel.id));
   if (isStaff(user.role)) return true;
   if (user.role === "CUSTOMER") return channel.kind === "CUSTOMER" && !!user.relation_id && channel.customer_relation_id === user.relation_id;
   if (user.role === "SUBCONTRACTOR") return channel.kind === "SUBCONTRACTOR" && !!user.relation_id && channel.relation_id === user.relation_id;
   if (user.role === "FIELD") {
     if (channel.kind === "SUBCONTRACTOR") return false;
     if (await isAddedMember(user.id, channel.id)) return true;
-    return channel.kind === "INTERNAL" && (await isPlannedCrew(user.id, channel.project_id));
+    return channel.kind === "INTERNAL" && (await isPlannedCrew(user.id, channel.project_id as string));
   }
   return false;
 };
@@ -88,7 +92,7 @@ export const ensureChannels = async (projectId: string, client?: any) => {
   await run(`INSERT INTO chat_channels (project_id, kind) VALUES ($1::uuid, 'CUSTOMER'), ($1::uuid, 'INTERNAL') ON CONFLICT DO NOTHING`, [projectId]);
   await run(
     `INSERT INTO chat_channels (project_id, kind, relation_id)
-     SELECT DISTINCT sa.project_id, 'SUBCONTRACTOR', sa.subcontractor_id FROM subcontract_assignments sa
+     SELECT DISTINCT sa.project_id, 'SUBCONTRACTOR'::"ChatChannelKind", sa.subcontractor_id FROM subcontract_assignments sa
      WHERE sa.project_id = $1::uuid AND sa.status <> 'DRAFT' ON CONFLICT DO NOTHING`,
     [projectId],
   );
@@ -102,12 +106,25 @@ export interface IAudienceMember {
   id: string;
   name: string;
   role: string;
-  source: "staff" | "customer" | "subcontractor" | "planned" | "added";
+  source: "staff" | "customer" | "subcontractor" | "planned" | "added" | "member";
 }
 
 export const audienceOf = async (channel: IChatChannel): Promise<IAudienceMember[]> => {
   const members: IAudienceMember[] = [];
   const add = (rows: any[], source: IAudienceMember["source"]) => rows.forEach((r) => members.push({ id: r.id, name: r.name, role: r.role, source }));
+
+  // A staff conversation: exactly its members (never all staff)
+  if (isConversationKind(channel.kind)) {
+    add(
+      (await query(
+        `SELECT u.id, u.name, u.role::text AS role FROM chat_members m JOIN users u ON u.id = m.user_id
+         WHERE m.channel_id = $1::uuid AND u.is_active AND u.status = 'ACTIVE' AND u.role::text = ANY($2::text[])`,
+        [channel.id, [...employeeRoles]],
+      )).rows,
+      "member",
+    );
+    return members;
+  }
 
   add((await query(`SELECT id, name, role::text AS role FROM users WHERE is_active AND status = 'ACTIVE' AND role::text = ANY($1::text[])`, [[...staffRoles]])).rows, "staff");
 
@@ -158,9 +175,9 @@ export const unreadFor = async (channelId: string, userId: string) => {
   return r.rows[0].n as number;
 };
 
-export const pushChatUnread = async (channel: Pick<IChatChannel, "id" | "project_id">, userId: string) => {
+export const pushChatUnread = async (channel: Pick<IChatChannel, "id" | "project_id" | "kind">, userId: string) => {
   try {
-    emitToUser(userId, "chat:unread", { channel_id: channel.id, project_id: channel.project_id, unread: await unreadFor(channel.id, userId) });
+    emitToUser(userId, "chat:unread", { channel_id: channel.id, project_id: channel.project_id, channel_kind: channel.kind, unread: await unreadFor(channel.id, userId) });
   } catch {
     // the push is a convenience
   }
@@ -213,7 +230,8 @@ export const shapePerson = (person: { id: string; name: string; role: string }, 
   role_label: roleLabels[person.role] ?? person.role,
 });
 
-export const channelTitle = (channel: Pick<IChatChannel, "kind" | "project_number">) => `${channel.project_number} (${channelLabels[channel.kind]})`;
+export const channelTitle = (channel: Pick<IChatChannel, "kind" | "project_number" | "title">) =>
+  isConversationKind(channel.kind) ? (channel.title ?? "Chat") : `${channel.project_number} (${channelLabels[channel.kind]})`;
 
 // Unread chat messages per project, for the portals' project and assignment lists. `kind` says which
 // of the project's channels the person is looking at: the customer channel, or their company's own.

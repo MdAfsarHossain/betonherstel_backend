@@ -25,7 +25,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface ISubscription {
   userId: string;
-  projectId: string;
+  projectId: string | null;
   verifiedAt: number;
 }
 
