@@ -50,19 +50,29 @@ const getMySchedule = catchAsync(async (req: Request, res: Response) => {
   });
 });
 
-const completeMyAppointment = catchAsync(async (req: Request, res: Response) => {
-  const result = await PlanningService.completeMyAppointment(req.params.id as string, req.user.id, req.body ?? {});
+const completeMyAppointment = catchAsync(
+  async (req: Request, res: Response) => {
+    const result = await PlanningService.completeMyAppointment(
+      req.params.id as string,
+      req.user.id,
+      req.body ?? {},
+    );
 
-  sendResponse(res, {
-    statusCode: httpStatus.OK,
-    success: true,
-    message: result.already_completed ? "The appointment was already marked as done" : "The appointment is marked as done",
-    data: result,
-  });
-});
+    sendResponse(res, {
+      statusCode: httpStatus.OK,
+      success: true,
+      message: result.already_completed
+        ? "The appointment was already marked as done"
+        : "The appointment is marked as done",
+      data: result,
+    });
+  },
+);
 
 const getAppointmentById = catchAsync(async (req: Request, res: Response) => {
-  const result = await PlanningService.getAppointmentById(req.params.id as string);
+  const result = await PlanningService.getAppointmentById(
+    req.params.id as string,
+  );
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -102,7 +112,17 @@ const createAppointment = catchAsync(async (req: Request, res: Response) => {
 const updateAppointment = catchAsync(async (req: Request, res: Response) => {
   const result = await PlanningService.updateAppointment(
     req.params.id as string,
-    pickValidFields(req.body, ["type", "title", "starts_at", "ends_at", "all_day", "project_id", "address", "notes", "assignee_ids"]) as any,
+    pickValidFields(req.body, [
+      "type",
+      "title",
+      "starts_at",
+      "ends_at",
+      "all_day",
+      "project_id",
+      "address",
+      "notes",
+      "assignee_ids",
+    ]) as any,
     req.user.id,
   );
 
@@ -157,7 +177,11 @@ const checkConflicts = catchAsync(async (req: Request, res: Response) => {
 });
 
 const sendConfirmation = catchAsync(async (req: Request, res: Response) => {
-  const result = await PlanningService.sendConfirmation(req.params.id as string, req.body.email, req.user.id);
+  const result = await PlanningService.sendConfirmation(
+    req.params.id as string,
+    req.body.email,
+    req.user.id,
+  );
 
   sendResponse(res, {
     statusCode: httpStatus.OK,
@@ -176,7 +200,8 @@ const createIcalToken = catchAsync(async (req: Request, res: Response) => {
   sendResponse(res, {
     statusCode: httpStatus.CREATED,
     success: true,
-    message: "Add this link to your calendar app. It is shown only once; creating a new one replaces it.",
+    message:
+      "Add this link to your calendar app. It is shown only once; creating a new one replaces it.",
     data: { url, token },
   });
 });

@@ -25,6 +25,7 @@ import {
   TAppointmentStatus,
   TAppointmentType,
 } from "./planning.interface";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Planning (SRS 4.9). Appointments for inspections, project work, maintenance visits
 // and internal matters, with one or more employees each. The calendar views are
@@ -589,7 +590,7 @@ const customerContact = async (
 const logAppointmentEvent = (
   client: any,
   appointment: { id: string; relation_id: string | null },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},
@@ -645,22 +646,36 @@ const loadLinkableProject = async (projectId: string, client?: any) => {
 // The response lists any double-booking as `conflicts`: a warning, not an error.
 // Tells the people put on an appointment that it is theirs (what, when, where). Called AFTER the
 // appointment is saved; the planner is never told about their own action, and it never throws.
-const notifyAssigned = async (appointment: any, userIds: string[], actorId: string | null) => {
+const notifyAssigned = async (
+  appointment: any,
+  userIds: string[],
+  actorId: string | null,
+) => {
   try {
     if (userIds.length === 0 || appointment.status === "CANCELLED") return;
-    const where = [appointment.street, appointment.house_number, appointment.postcode, appointment.city]
+    const where = [
+      appointment.street,
+      appointment.house_number,
+      appointment.postcode,
+      appointment.city,
+    ]
       .filter(Boolean)
       .join(" ");
     const when = describeWhen(appointment);
     await notify(userIds, {
       type: "APPOINTMENT_ASSIGNED",
       title: `${appointmentTypeLabels[appointment.type as TAppointmentType].EN} planned for you: ${appointment.title}`,
-      body: [when, appointment.relation?.name, where].filter(Boolean).join(" · "),
+      body: [when, appointment.relation?.name, where]
+        .filter(Boolean)
+        .join(" · "),
       entity: { type: "appointment", id: appointment.id },
       actorId,
     });
   } catch (error: any) {
-    console.error("❌ Appointment notification failed:", error?.message ?? error);
+    console.error(
+      "❌ Appointment notification failed:",
+      error?.message ?? error,
+    );
   }
 };
 
@@ -674,7 +689,12 @@ const notifyRescheduled = async (
 ) => {
   try {
     if (userIds.length === 0 || appointment.status === "CANCELLED") return;
-    const where = [appointment.street, appointment.house_number, appointment.postcode, appointment.city]
+    const where = [
+      appointment.street,
+      appointment.house_number,
+      appointment.postcode,
+      appointment.city,
+    ]
       .filter(Boolean)
       .join(" ");
     await notify(userIds, {
@@ -692,30 +712,52 @@ const notifyRescheduled = async (
       actorId,
     });
   } catch (error: any) {
-    console.error("❌ Appointment reschedule notification failed:", error?.message ?? error);
+    console.error(
+      "❌ Appointment reschedule notification failed:",
+      error?.message ?? error,
+    );
   }
 };
 
 // Tells everyone on an appointment that it was cancelled (and why). Called AFTER the status is saved;
 // whoever cancelled it is never told, and it never throws.
-const notifyCancelled = async (appointment: any, reason: string | null, actorId: string | null) => {
+const notifyCancelled = async (
+  appointment: any,
+  reason: string | null,
+  actorId: string | null,
+) => {
   try {
-    const userIds: string[] = (appointment.assignees ?? []).map((a: any) => a.id).filter(Boolean);
+    const userIds: string[] = (appointment.assignees ?? [])
+      .map((a: any) => a.id)
+      .filter(Boolean);
     if (userIds.length === 0) return;
-    const where = [appointment.street, appointment.house_number, appointment.postcode, appointment.city]
+    const where = [
+      appointment.street,
+      appointment.house_number,
+      appointment.postcode,
+      appointment.city,
+    ]
       .filter(Boolean)
       .join(" ");
     await notify(userIds, {
       type: "APPOINTMENT_CANCELLED",
       title: `${appointmentTypeLabels[appointment.type as TAppointmentType].EN} cancelled: ${appointment.title}`,
-      body: [describeWhen(appointment), appointment.relation?.name, where, reason ? `Reason: ${reason}` : null]
+      body: [
+        describeWhen(appointment),
+        appointment.relation?.name,
+        where,
+        reason ? `Reason: ${reason}` : null,
+      ]
         .filter(Boolean)
         .join(" · "),
       entity: { type: "appointment", id: appointment.id },
       actorId,
     });
   } catch (error: any) {
-    console.error("❌ Appointment cancel notification failed:", error?.message ?? error);
+    console.error(
+      "❌ Appointment cancel notification failed:",
+      error?.message ?? error,
+    );
   }
 };
 
@@ -938,7 +980,11 @@ const createAppointment = async (
 // crew member cannot reopen, cancel or move it, and someone else's appointment answers 404 like one
 // that does not exist. A repeat (a phone retrying) is answered as done, nothing happens twice.
 // The office is told: the person who planned it, else the whole office.
-const completeMyAppointment = async (id: string, userId: string, payload: { note?: string }) => {
+const completeMyAppointment = async (
+  id: string,
+  userId: string,
+  payload: { note?: string },
+) => {
   assertUuid(id, "appointment id");
   const mine = await query(
     `
@@ -958,37 +1004,69 @@ const completeMyAppointment = async (id: string, userId: string, payload: { note
     throw new ApiError(httpStatus.CONFLICT, "This appointment is cancelled!");
   }
   if (appointment.status === "COMPLETED") {
-    return { id, title: appointment.title, type: appointment.type, status: "COMPLETED", already_completed: true };
+    return {
+      id,
+      title: appointment.title,
+      type: appointment.type,
+      status: "COMPLETED",
+      already_completed: true,
+    };
   }
   if (new Date(appointment.starts_at).getTime() > Date.now()) {
-    throw new ApiError(httpStatus.BAD_REQUEST, "This appointment has not started yet!");
+    throw new ApiError(
+      httpStatus.BAD_REQUEST,
+      "This appointment has not started yet!",
+    );
   }
 
   try {
-    await changeStatus(id, { status: "COMPLETED", reason: payload.note }, userId);
+    await changeStatus(
+      id,
+      { status: "COMPLETED", reason: payload.note },
+      userId,
+    );
   } catch (error: any) {
     // Two taps at the same moment: the other one won, which is what was asked for
     if (!/already has this status/i.test(String(error?.message))) throw error;
-    return { id, title: appointment.title, type: appointment.type, status: "COMPLETED", already_completed: true };
+    return {
+      id,
+      title: appointment.title,
+      type: appointment.type,
+      status: "COMPLETED",
+      already_completed: true,
+    };
   }
 
-  const who = await query(`SELECT name FROM users WHERE id = $1::uuid`, [userId]);
+  const who = await query(`SELECT name FROM users WHERE id = $1::uuid`, [
+    userId,
+  ]);
   const planner = appointment.created_by
     ? await query(
         `SELECT id FROM users WHERE id = $1::uuid AND is_active AND status = 'ACTIVE' AND role::text = ANY($2::text[])`,
         [appointment.created_by, ["SUPERADMIN", "ADMIN", "OFFICE"]],
       )
     : { rows: [] as any[] };
-  const recipients = planner.rows.length > 0 ? [planner.rows[0].id as string] : await officeUserIds();
+  const recipients =
+    planner.rows.length > 0
+      ? [planner.rows[0].id as string]
+      : await officeUserIds();
   await notify(recipients, {
     type: "APPOINTMENT_COMPLETED",
     title: `${appointmentTypeLabels[appointment.type as TAppointmentType].EN} done: ${appointment.title}`,
-    body: clean(payload.note) ?? `${who.rows[0]?.name ?? "A crew member"} marked this appointment as done.`,
+    body:
+      clean(payload.note) ??
+      `${who.rows[0]?.name ?? "A crew member"} marked this appointment as done.`,
     entity: { type: "appointment", id },
     actorId: userId,
   });
 
-  return { id, title: appointment.title, type: appointment.type, status: "COMPLETED", already_completed: false };
+  return {
+    id,
+    title: appointment.title,
+    type: appointment.type,
+    status: "COMPLETED",
+    already_completed: false,
+  };
 };
 
 const lockAppointment = async (client: any, id: string) => {
@@ -1019,7 +1097,8 @@ const updateAppointment = async (
   // Who was on it before this change (to tell only the people who are new)
   let assigneesBefore: string[] = [];
   // The time before this change, when this change moved it
-  let movedFrom: { starts_at: any; ends_at: any; all_day: boolean } | null = null;
+  let movedFrom: { starts_at: any; ends_at: any; all_day: boolean } | null =
+    null;
 
   await transaction(async (client) => {
     const current = await lockAppointment(client, id);
@@ -1196,7 +1275,7 @@ const changeStatus = async (
       [id, payload.status],
     );
 
-    const labels: Record<TAppointmentStatus, [string, string]> = {
+    const labels: Record<TAppointmentStatus, [TRelationEventType, string]> = {
       PLANNED: ["APPOINTMENT_REOPENED", "reopened"],
       COMPLETED: ["APPOINTMENT_COMPLETED", "completed"],
       CANCELLED: ["APPOINTMENT_CANCELLED", "cancelled"],
