@@ -32,6 +32,7 @@ import {
   IUpdateProject,
   projectFolders,
 } from "./project.interface";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Projecten (SRS 4.8). An accepted quotation becomes a project: the job that is
 // planned, executed, extended with additional work (meerwerk) and finally invoiced
@@ -180,7 +181,7 @@ const assertOpen = (project: { closed_at: any }) => {
 const logProjectEvent = (
   client: any,
   project: { id: string; relation_id: string },
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},
