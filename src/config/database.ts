@@ -1,5 +1,89 @@
 import { Pool } from "pg";
 import dotenv from "dotenv";
+import { relationEventTypes } from "../app/modules/relation/relation.interface";
+import { notificationTypes } from "../app/modules/messages/notification.types";
+
+// Enum values as an SQL list: 'NOTE', 'OTHER', ... (constants from the code, never user input)
+const sqlList = (values: readonly string[]) => values.map((value) => `'${value}'`).join(", ");
+
+// The timeline events, and the notification kinds. OTHER is a fallback for an old row whose value is not known any
+// more; the code never writes it. Both lists live in the code, so a new kind compiles everywhere it is used.
+const eventValues = sqlList(relationEventTypes);
+const notificationValues = sqlList([...notificationTypes, "OTHER"]);
+
+// Creates an enum with these values, or adds the values an existing one does not have yet (ADD VALUE IF NOT
+// EXISTS, outside a transaction so the new value can be used at once). Used for lists that grow with the code.
+const ensureEnum = async (client: any, name: string, values: readonly string[]) => {
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '${name}') THEN
+            CREATE TYPE "${name}" AS ENUM (${sqlList(values)});
+        END IF;
+    END $$;
+  `);
+  const known = await client.query(
+    `SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid WHERE t.typname = $1`,
+    [name],
+  );
+  const knownNames = new Set(known.rows.map((row: any) => row.enumlabel));
+  for (const value of values) {
+    if (!knownNames.has(value)) {
+      await client.query(`ALTER TYPE "${name}" ADD VALUE IF NOT EXISTS '${value}'`);
+    }
+  }
+};
+
+interface IEnumColumn {
+  column: string;
+  type: string;
+  // the column's default, given again as the enum value (the old VARCHAR default cannot be cast on its own)
+  default?: string;
+}
+
+// A database made before an enum has its column as VARCHAR + a CHECK named `<table>_<column>_check`: turn the columns
+// into the enums once. All of one table's columns are converted in ONE `ALTER TABLE` (the table is rewritten once)
+// and inside ONE transaction, so a row that does not fit the enum rolls everything back instead of leaving a half
+// converted table. Rows keep their value. `dropConstraints` are other constraints that read the column (they are
+// dropped first); `afterSql` makes them again, against the enum. A no-op (and quick) once the columns are enums.
+// Names are constants from the code, never user input.
+const convertColumnsToEnums = async (
+  client: any,
+  table: string,
+  columns: IEnumColumn[],
+  options: { dropConstraints?: string[]; afterSql?: string[] } = {},
+) => {
+  const found = await client.query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = ANY($2::text[]) AND data_type = 'character varying'`,
+    [table, columns.map((c) => c.column)],
+  );
+  const todo = columns.filter((c) => found.rows.some((row: any) => row.column_name === c.column));
+  if (todo.length === 0) return false;
+
+  await client.query("BEGIN");
+  try {
+    for (const name of options.dropConstraints ?? []) {
+      await client.query(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${name}`);
+    }
+    for (const c of todo) {
+      await client.query(`ALTER TABLE ${table} DROP CONSTRAINT IF EXISTS ${table}_${c.column}_check`);
+      if (c.default) await client.query(`ALTER TABLE ${table} ALTER COLUMN ${c.column} DROP DEFAULT`);
+    }
+    await client.query(
+      `ALTER TABLE ${table} ${todo.map((c) => `ALTER COLUMN ${c.column} TYPE "${c.type}" USING ${c.column}::"${c.type}"`).join(", ")}`,
+    );
+    for (const c of todo) {
+      if (c.default) await client.query(`ALTER TABLE ${table} ALTER COLUMN ${c.column} SET DEFAULT '${c.default}'`);
+    }
+    for (const sql of options.afterSql ?? []) await client.query(sql);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  }
+  return true;
+};
 
 dotenv.config();
 
@@ -165,6 +249,120 @@ const createEnumsWithDOBlock = async (client: any) => {
     BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'InquirySource') THEN
             CREATE TYPE "InquirySource" AS ENUM ('FORM', 'WEBHOOK', 'PORTAL', 'PHONE', 'EMAIL', 'OTHER');
+        END IF;
+    END $$;
+  `);
+
+  // Uren: what kind of hours an entry is, and where it is in the weekly approval
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'TimeEntryType') THEN
+            CREATE TYPE "TimeEntryType" AS ENUM ('WORK', 'TRAVEL', 'INSPECTION', 'INTERNAL');
+        END IF;
+    END $$;
+  `);
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'TimeEntryStatus') THEN
+            CREATE TYPE "TimeEntryStatus" AS ENUM ('SUBMITTED', 'APPROVED', 'REJECTED');
+        END IF;
+    END $$;
+  `);
+
+  // Inkoop: a supplier's invoice (Ontvangen -> Goedgekeurd -> Betaald, or VOID for a mistake)
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'SupplierInvoiceStatus') THEN
+            CREATE TYPE "SupplierInvoiceStatus" AS ENUM ('RECEIVED', 'APPROVED', 'PAID', 'VOID');
+        END IF;
+    END $$;
+  `);
+
+  // Uitbesteden: an assignment to a subcontractor, and how the subcontractor's answer reached us
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'SubcontractAssignmentStatus') THEN
+            CREATE TYPE "SubcontractAssignmentStatus" AS ENUM ('DRAFT', 'SENT', 'CONFIRMED', 'DECLINED', 'COMPLETED', 'INVOICED', 'CANCELLED');
+        END IF;
+    END $$;
+  `);
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'SubcontractResponseVia') THEN
+            CREATE TYPE "SubcontractResponseVia" AS ENUM ('PHONE', 'EMAIL', 'IN_PERSON', 'OTHER', 'PORTAL');
+        END IF;
+    END $$;
+  `);
+
+  // Every kind of event on a relation's timeline. The list lives in the code (relation.interface.ts), so a new kind
+  // of event compiles everywhere it is used; here it is created, and values that were added to the list later are
+  // added to an existing database (ADD VALUE IF NOT EXISTS, outside a transaction so the value can be used at once).
+  await ensureEnum(client, "RelationEventType", relationEventTypes);
+
+  // Notifications: what a notification is about (the list is notification.types.ts, plus the OTHER fallback)
+  await ensureEnum(client, "NotificationType", [...notificationTypes, "OTHER"]);
+
+  // Projecten: the folders of a project's files (before / during / after the work, or general)
+  await ensureEnum(client, "ProjectFileFolder", ["BEFORE", "DURING", "AFTER", "GENERAL"]);
+
+  // Facturen: what kind of document an invoice is, where it came from, whether it is issued, and where it is in
+  // being paid (`payment_status` is empty for a draft)
+  await ensureEnum(client, "InvoiceKind", ["STANDARD", "INSTALMENT", "FINAL", "CREDIT_NOTE"]);
+  await ensureEnum(client, "InvoiceSource", ["MANUAL", "QUOTE", "PROJECT", "INSTALMENT", "FINAL", "CREDIT"]);
+  await ensureEnum(client, "InvoiceStatus", ["DRAFT", "ISSUED"]);
+  await ensureEnum(client, "InvoicePaymentStatus", ["OPEN", "PARTIALLY_PAID", "PAID", "CREDITED"]);
+  await ensureEnum(client, "InvoiceLineType", ["MANUAL", "QUOTE", "PROJECT", "HOURS", "INSTALMENT", "DEDUCTION", "CREDIT"]);
+  await ensureEnum(client, "InvoicePaymentMethod", ["MOLLIE", "BANK", "OTHER"]);
+  await ensureEnum(client, "InvoiceReminderKind", ["AUTOMATIC", "MANUAL"]);
+  await ensureEnum(client, "InvoiceReminderStatus", ["SENT", "SKIPPED"]);
+
+  // E-mail: the result of sending one (the email log)
+  await ensureEnum(client, "EmailStatus", ["SENT", "FAILED"]);
+
+  // Abonnementen: whether the customer's direct-debit set-up was asked for by the office or the customer
+  await ensureEnum(client, "DirectDebitRequestedVia", ["OFFICE", "PORTAL"]);
+
+  // Catalogus: what a catalogue item is (a material, a labour rate or a service)
+  await ensureEnum(client, "CatalogueItemType", ["MATERIAL", "LABOUR", "SERVICE"]);
+
+  // Acties: a task is open or done, and was made by a person or automatically for an event
+  await ensureEnum(client, "ActionStatus", ["OPEN", "DONE"]);
+  await ensureEnum(client, "ActionSource", ["MANUAL", "AUTOMATIC"]);
+
+  // Chat: a project's channels (customer, internal, one per subcontractor) and the staff conversations (one-to-one, group)
+  await ensureEnum(client, "ChatChannelKind", ["CUSTOMER", "INTERNAL", "SUBCONTRACTOR", "DIRECT", "GROUP"]);
+
+  // Offertes: how an acceptance reached us (the customer portal, or the office records it)
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'QuoteAcceptedVia') THEN
+            CREATE TYPE "QuoteAcceptedVia" AS ENUM ('PORTAL', 'PHONE', 'EMAIL', 'IN_PERSON', 'OTHER');
+        END IF;
+    END $$;
+  `);
+
+  // Inkoop: a purchase order to a supplier (Concept -> Besteld -> Deels/Geheel ontvangen, or Geannuleerd)
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'PurchaseOrderStatus') THEN
+            CREATE TYPE "PurchaseOrderStatus" AS ENUM ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED');
+        END IF;
+    END $$;
+  `);
+
+  // Werkbon status: Open -> In uitvoering -> Afgerond -> Gecontroleerd (the order is the workflow)
+  await client.query(`
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'WorkOrderStatus') THEN
+            CREATE TYPE "WorkOrderStatus" AS ENUM ('OPEN', 'IN_PROGRESS', 'COMPLETED', 'CHECKED');
         END IF;
     END $$;
   `);
@@ -467,7 +665,7 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS relation_timeline (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   relation_id             UUID NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
-  event_type              VARCHAR(50) NOT NULL,
+  event_type              "RelationEventType" NOT NULL,
   entity_type             VARCHAR(50),
   entity_id               UUID,
   title                   VARCHAR(255) NOT NULL,
@@ -476,6 +674,23 @@ export const initDatabase = async () => {
   actor_id                UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // A database made before the enum has event_type as VARCHAR(50): turn it into the enum once. A row whose type is
+    // not a known event (the code never wrote one) becomes OTHER and keeps its old name in metadata, so nothing is
+    // lost and the start-up is never stopped by it. A no-op once the column is the enum.
+    const timelineIsText = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'relation_timeline'
+         AND column_name = 'event_type' AND data_type = 'character varying'`,
+    );
+    if (timelineIsText.rows.length > 0) {
+      await client.query(
+        `UPDATE relation_timeline
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('original_event_type', event_type), event_type = 'OTHER'
+         WHERE event_type NOT IN (${eventValues})`,
+      );
+      await client.query(
+        `ALTER TABLE relation_timeline ALTER COLUMN event_type TYPE "RelationEventType" USING event_type::"RelationEventType"`,
+      );
+    }
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_relation_timeline_relation ON relation_timeline (relation_id, created_at DESC);`,
     );
@@ -579,13 +794,14 @@ export const initDatabase = async () => {
   subject                 VARCHAR(255) NOT NULL,
   template_key            VARCHAR(50),
   language                "Language",
-  status                  VARCHAR(10) NOT NULL CHECK (status IN ('SENT', 'FAILED')),
+  status                  "EmailStatus" NOT NULL,
   error                   TEXT,
   related_type            VARCHAR(50),
   related_id              UUID,
   sent_by                 UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    await convertColumnsToEnums(client, "email_log", [{ column: "status", type: "EmailStatus" }]);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_email_log_related ON email_log (related_type, related_id, created_at DESC);`,
     );
@@ -793,7 +1009,7 @@ export const initDatabase = async () => {
   code                    VARCHAR(50) UNIQUE,
   name                    VARCHAR(255) NOT NULL,
   description             TEXT,
-  type                    VARCHAR(10) NOT NULL DEFAULT 'MATERIAL' CHECK (type IN ('MATERIAL', 'LABOUR', 'SERVICE')),
+  type                    "CatalogueItemType" NOT NULL DEFAULT 'MATERIAL',
   unit                    VARCHAR(10) NOT NULL DEFAULT 'piece' CHECK (unit IN ('m', 'm2', 'm3', 'piece', 'hour', 'lump_sum')),
   unit_price              NUMERIC(12,2) NOT NULL DEFAULT 0,
   cost_price              NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -803,6 +1019,10 @@ export const initDatabase = async () => {
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // The table was called articles once: a renamed old table keeps its check under the old name
+    await convertColumnsToEnums(client, "catalogue_items", [{ column: "type", type: "CatalogueItemType", default: "MATERIAL" }], {
+      dropConstraints: ["articles_type_check"],
+    });
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_catalogue_items_name_lower ON catalogue_items (LOWER(name));`,
     );
@@ -860,7 +1080,7 @@ export const initDatabase = async () => {
   pdf_data                BYTEA,
   accepted_at             TIMESTAMPTZ,
   accepted_by_name        VARCHAR(255),
-  accepted_via            VARCHAR(10) CHECK (accepted_via IN ('PORTAL', 'PHONE', 'EMAIL', 'IN_PERSON', 'OTHER')),
+  accepted_via            "QuoteAcceptedVia",
   accepted_ip             VARCHAR(45),
   terms_accepted          BOOLEAN NOT NULL DEFAULT false,
   rejected_at             TIMESTAMPTZ,
@@ -873,6 +1093,19 @@ export const initDatabase = async () => {
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT quotes_number_revision UNIQUE (number, revision)
 );`);
+    // A database made before the enum has accepted_via as VARCHAR(10) + a CHECK (so only the five known values):
+    // turn it into the enum once. quotes.status is already the "QuoteStatus" enum. A no-op once it is the enum.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'quotes' AND column_name = 'accepted_via'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE quotes DROP CONSTRAINT IF EXISTS quotes_accepted_via_check;
+              ALTER TABLE quotes ALTER COLUMN accepted_via TYPE "QuoteAcceptedVia" USING accepted_via::"QuoteAcceptedVia";
+          END IF;
+      END $$;
+    `);
     await client.query(
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_quotes_current ON quotes (number) WHERE is_current;`,
     );
@@ -1112,7 +1345,7 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS project_files (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id                  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  folder                      VARCHAR(10) NOT NULL DEFAULT 'GENERAL' CHECK (folder IN ('BEFORE', 'DURING', 'AFTER', 'GENERAL')),
+  folder                      "ProjectFileFolder" NOT NULL DEFAULT 'GENERAL',
   file_url                    TEXT NOT NULL,
   storage_key                 TEXT NOT NULL,
   file_name                   VARCHAR(255) NOT NULL,
@@ -1124,6 +1357,21 @@ export const initDatabase = async () => {
   uploaded_by                 UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at                  TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // A database made before the enum has folder as VARCHAR(10) + a CHECK: turn it into the enum once (rows keep
+    // their value, the index on (project_id, folder, created_at) is rebuilt by Postgres). A no-op once it is the enum.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'project_files' AND column_name = 'folder'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE project_files DROP CONSTRAINT IF EXISTS project_files_folder_check;
+              ALTER TABLE project_files ALTER COLUMN folder DROP DEFAULT;
+              ALTER TABLE project_files ALTER COLUMN folder TYPE "ProjectFileFolder" USING folder::"ProjectFileFolder";
+              ALTER TABLE project_files ALTER COLUMN folder SET DEFAULT 'GENERAL';
+          END IF;
+      END $$;
+    `);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_project_files_project ON project_files (project_id, folder, created_at);`,
     );
@@ -1145,7 +1393,7 @@ export const initDatabase = async () => {
   appointment_id          UUID REFERENCES appointments(id) ON DELETE SET NULL,
   title                   VARCHAR(255) NOT NULL,
   instructions            TEXT,
-  status                  VARCHAR(12) NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'IN_PROGRESS', 'COMPLETED', 'CHECKED')),
+  status                  "WorkOrderStatus" NOT NULL DEFAULT 'OPEN',
   planned_date            DATE,
   street                  VARCHAR(255),
   house_number            VARCHAR(20),
@@ -1172,6 +1420,21 @@ export const initDatabase = async () => {
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // A database made before the enum has status as VARCHAR(12) + a CHECK: turn it into the enum once (the rows keep
+    // their value, the index on status is rebuilt by Postgres). A no-op once the column is the enum.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'work_orders' AND column_name = 'status'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE work_orders DROP CONSTRAINT IF EXISTS work_orders_status_check;
+              ALTER TABLE work_orders ALTER COLUMN status DROP DEFAULT;
+              ALTER TABLE work_orders ALTER COLUMN status TYPE "WorkOrderStatus" USING status::"WorkOrderStatus";
+              ALTER TABLE work_orders ALTER COLUMN status SET DEFAULT 'OPEN';
+          END IF;
+      END $$;
+    `);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_work_orders_project ON work_orders (project_id);`,
     );
@@ -1260,13 +1523,13 @@ export const initDatabase = async () => {
   user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   work_date               DATE NOT NULL,
   minutes                 INTEGER NOT NULL CHECK (minutes > 0 AND minutes <= 1440),
-  entry_type              VARCHAR(10) NOT NULL DEFAULT 'WORK',
+  entry_type              "TimeEntryType" NOT NULL DEFAULT 'WORK',
   is_billable             BOOLEAN NOT NULL DEFAULT true,
   note                    VARCHAR(500),
   client_id               UUID,
   started_at              TIMESTAMPTZ,
   ended_at                TIMESTAMPTZ,
-  status                  VARCHAR(10) NOT NULL DEFAULT 'SUBMITTED',
+  status                  "TimeEntryStatus" NOT NULL DEFAULT 'SUBMITTED',
   reject_reason           VARCHAR(500),
   approved_by             UUID REFERENCES users(id) ON DELETE SET NULL,
   approved_at             TIMESTAMPTZ,
@@ -1284,7 +1547,7 @@ export const initDatabase = async () => {
       `project_id UUID REFERENCES projects(id) ON DELETE RESTRICT`,
       `started_at TIMESTAMPTZ`,
       `ended_at TIMESTAMPTZ`,
-      `status VARCHAR(10) NOT NULL DEFAULT 'SUBMITTED'`,
+      `status "TimeEntryStatus" NOT NULL DEFAULT 'SUBMITTED'`,
       `reject_reason VARCHAR(500)`,
       `approved_by UUID REFERENCES users(id) ON DELETE SET NULL`,
       `approved_at TIMESTAMPTZ`,
@@ -1312,16 +1575,32 @@ export const initDatabase = async () => {
     await client.query(
       `ALTER TABLE time_entries DROP CONSTRAINT IF EXISTS work_order_hours_work_order_id_client_id_key;`,
     );
+    // A database made before the enums has entry_type / status as VARCHAR(10) + a CHECK each: turn them into the
+    // enums once (rows keep their value; the indexes are rebuilt by Postgres). The project-required check is
+    // dropped first and made again below, so it is written against the enum. A no-op once they are enums.
     await client.query(`
       DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'time_entries_entry_type_check') THEN
-          ALTER TABLE time_entries ADD CONSTRAINT time_entries_entry_type_check
-            CHECK (entry_type IN ('WORK', 'TRAVEL', 'INSPECTION', 'INTERNAL'));
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'time_entries' AND column_name = 'entry_type'
+                     AND data_type = 'character varying') THEN
+          ALTER TABLE time_entries DROP CONSTRAINT IF EXISTS time_entries_project_required;
+          ALTER TABLE time_entries DROP CONSTRAINT IF EXISTS time_entries_entry_type_check;
+          ALTER TABLE time_entries ALTER COLUMN entry_type DROP DEFAULT;
+          ALTER TABLE time_entries ALTER COLUMN entry_type TYPE "TimeEntryType" USING entry_type::"TimeEntryType";
+          ALTER TABLE time_entries ALTER COLUMN entry_type SET DEFAULT 'WORK';
         END IF;
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'time_entries_status_check') THEN
-          ALTER TABLE time_entries ADD CONSTRAINT time_entries_status_check
-            CHECK (status IN ('SUBMITTED', 'APPROVED', 'REJECTED'));
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'time_entries' AND column_name = 'status'
+                     AND data_type = 'character varying') THEN
+          ALTER TABLE time_entries DROP CONSTRAINT IF EXISTS time_entries_status_check;
+          ALTER TABLE time_entries ALTER COLUMN status DROP DEFAULT;
+          ALTER TABLE time_entries ALTER COLUMN status TYPE "TimeEntryStatus" USING status::"TimeEntryStatus";
+          ALTER TABLE time_entries ALTER COLUMN status SET DEFAULT 'SUBMITTED';
         END IF;
+      END $$;
+    `);
+    await client.query(`
+      DO $$ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'time_entries_project_required') THEN
           ALTER TABLE time_entries ADD CONSTRAINT time_entries_project_required
             CHECK (entry_type = 'INTERNAL' OR project_id IS NOT NULL);
@@ -1374,10 +1653,10 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS invoices (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   number                  VARCHAR(30) UNIQUE,
-  kind                    VARCHAR(12) NOT NULL CHECK (kind IN ('STANDARD', 'INSTALMENT', 'FINAL', 'CREDIT_NOTE')),
-  source                  VARCHAR(12) NOT NULL CHECK (source IN ('MANUAL', 'QUOTE', 'PROJECT', 'INSTALMENT', 'FINAL', 'CREDIT')),
-  status                  VARCHAR(10) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ISSUED')),
-  payment_status          VARCHAR(14) CHECK (payment_status IN ('OPEN', 'PARTIALLY_PAID', 'PAID', 'CREDITED')),
+  kind                    "InvoiceKind" NOT NULL,
+  source                  "InvoiceSource" NOT NULL,
+  status                  "InvoiceStatus" NOT NULL DEFAULT 'DRAFT',
+  payment_status          "InvoicePaymentStatus",
   relation_id             UUID NOT NULL REFERENCES relations(id) ON DELETE RESTRICT,
   project_id              UUID REFERENCES projects(id) ON DELETE RESTRICT,
   quote_id                UUID REFERENCES quotes(id) ON DELETE SET NULL,
@@ -1418,6 +1697,36 @@ export const initDatabase = async () => {
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // A database made before the enums has kind, source, status and payment_status as VARCHAR + a CHECK each: turn
+    // them into the enums once (rows keep their value; the index on (status, payment_status) is rebuilt by Postgres).
+    // The four columns are converted in ONE statement, so the table (with the stored PDFs) is rewritten only once.
+    // A no-op once they are enums. (The trigger that refuses deleting an issued invoice reads status at run time.)
+    await client.query(`
+      DO $$
+      DECLARE
+          clauses text := '';
+          col record;
+      BEGIN
+          FOR col IN
+              SELECT * FROM (VALUES
+                  ('kind', 'InvoiceKind'), ('source', 'InvoiceSource'),
+                  ('status', 'InvoiceStatus'), ('payment_status', 'InvoicePaymentStatus')
+              ) AS c(name, enum_type)
+              WHERE EXISTS (SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'public' AND table_name = 'invoices' AND column_name = c.name
+                              AND data_type = 'character varying')
+          LOOP
+              EXECUTE format('ALTER TABLE invoices DROP CONSTRAINT IF EXISTS %I', 'invoices_' || col.name || '_check');
+              clauses := clauses || CASE WHEN clauses = '' THEN '' ELSE ', ' END
+                         || format('ALTER COLUMN %I TYPE %I USING %I::%I', col.name, col.enum_type, col.name, col.enum_type);
+          END LOOP;
+          IF clauses <> '' THEN
+              ALTER TABLE invoices ALTER COLUMN status DROP DEFAULT;
+              EXECUTE 'ALTER TABLE invoices ' || clauses;
+              ALTER TABLE invoices ALTER COLUMN status SET DEFAULT 'DRAFT';
+          END IF;
+      END $$;
+    `);
     for (const index of [
       `CREATE INDEX IF NOT EXISTS idx_invoices_relation ON invoices (relation_id);`,
       `CREATE INDEX IF NOT EXISTS idx_invoices_project ON invoices (project_id);`,
@@ -1435,7 +1744,7 @@ export const initDatabase = async () => {
   invoice_id              UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
   sort_order              INTEGER NOT NULL DEFAULT 0,
   section_title           VARCHAR(255),
-  line_type               VARCHAR(12) NOT NULL DEFAULT 'MANUAL' CHECK (line_type IN ('MANUAL', 'QUOTE', 'PROJECT', 'HOURS', 'INSTALMENT', 'DEDUCTION', 'CREDIT')),
+  line_type               "InvoiceLineType" NOT NULL DEFAULT 'MANUAL',
   catalogue_item_id       UUID REFERENCES catalogue_items(id) ON DELETE SET NULL,
   credits_line_id         UUID REFERENCES invoice_lines(id) ON DELETE RESTRICT,
   description             TEXT NOT NULL,
@@ -1448,6 +1757,7 @@ export const initDatabase = async () => {
   line_total              NUMERIC(14,2) NOT NULL,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    await convertColumnsToEnums(client, "invoice_lines", [{ column: "line_type", type: "InvoiceLineType", default: "MANUAL" }]);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_invoice_lines_invoice ON invoice_lines (invoice_id, sort_order);`,
     );
@@ -1460,13 +1770,14 @@ export const initDatabase = async () => {
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_id              UUID NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
   amount                  NUMERIC(14,2) NOT NULL CHECK (amount > 0),
-  method                  VARCHAR(10) NOT NULL CHECK (method IN ('MOLLIE', 'BANK', 'OTHER')),
+  method                  "InvoicePaymentMethod" NOT NULL,
   mollie_payment_id       VARCHAR(50) UNIQUE,
   paid_at                 TIMESTAMPTZ NOT NULL,
   reference               VARCHAR(255),
   recorded_by             UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    await convertColumnsToEnums(client, "invoice_payments", [{ column: "method", type: "InvoicePaymentMethod" }]);
     await client.query(
       `CREATE INDEX IF NOT EXISTS idx_invoice_payments_invoice ON invoice_payments (invoice_id);`,
     );
@@ -1492,14 +1803,18 @@ export const initDatabase = async () => {
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_id              UUID NOT NULL REFERENCES invoices(id) ON DELETE RESTRICT,
   days_after_due          INTEGER,
-  kind                    VARCHAR(10) NOT NULL DEFAULT 'AUTOMATIC' CHECK (kind IN ('AUTOMATIC', 'MANUAL')),
-  status                  VARCHAR(8) NOT NULL DEFAULT 'SENT' CHECK (status IN ('SENT', 'SKIPPED')),
+  kind                    "InvoiceReminderKind" NOT NULL DEFAULT 'AUTOMATIC',
+  status                  "InvoiceReminderStatus" NOT NULL DEFAULT 'SENT',
   sent_to                 VARCHAR(255),
   payment_link_id         UUID REFERENCES invoice_payment_links(id) ON DELETE SET NULL,
   created_by              UUID REFERENCES users(id) ON DELETE SET NULL,
   sent_at                 TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (invoice_id, days_after_due)
 );`);
+    await convertColumnsToEnums(client, "invoice_reminders", [
+      { column: "kind", type: "InvoiceReminderKind", default: "AUTOMATIC" },
+      { column: "status", type: "InvoiceReminderStatus", default: "SENT" },
+    ]);
 
     // The Mollie API key, encrypted (NFR-SEC-07). One row.
     await client.query(`CREATE TABLE IF NOT EXISTS mollie_settings (
@@ -1612,11 +1927,12 @@ export const initDatabase = async () => {
   mollie_payment_id       VARCHAR(50) NOT NULL UNIQUE,
   checkout_url            TEXT NOT NULL,
   status                  VARCHAR(12) NOT NULL DEFAULT 'open',
-  requested_via           VARCHAR(8) NOT NULL DEFAULT 'OFFICE' CHECK (requested_via IN ('OFFICE', 'PORTAL')),
+  requested_via           "DirectDebitRequestedVia" NOT NULL DEFAULT 'OFFICE',
   requested_by            UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    await convertColumnsToEnums(client, "direct_debit_setups", [{ column: "requested_via", type: "DirectDebitRequestedVia", default: "OFFICE" }]);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_direct_debit_setups_relation ON direct_debit_setups (relation_id, created_at DESC);`);
 
     // Invoices that come from a contract, collections by direct debit, and reversals
@@ -1652,7 +1968,7 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS purchase_orders (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   number                  VARCHAR(30) UNIQUE,
-  status                  VARCHAR(20) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED')),
+  status                  "PurchaseOrderStatus" NOT NULL DEFAULT 'DRAFT',
   supplier_id             UUID NOT NULL REFERENCES relations(id) ON DELETE RESTRICT,
   project_id              UUID REFERENCES projects(id) ON DELETE RESTRICT,
   title                   VARCHAR(255),
@@ -1684,6 +2000,21 @@ export const initDatabase = async () => {
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );`);
+    // A database made before the enum has status as VARCHAR(20) + a CHECK: turn it into the enum once (rows keep
+    // their value, the index on status is rebuilt by Postgres). A no-op once the column is the enum.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'purchase_orders' AND column_name = 'status'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE purchase_orders DROP CONSTRAINT IF EXISTS purchase_orders_status_check;
+              ALTER TABLE purchase_orders ALTER COLUMN status DROP DEFAULT;
+              ALTER TABLE purchase_orders ALTER COLUMN status TYPE "PurchaseOrderStatus" USING status::"PurchaseOrderStatus";
+              ALTER TABLE purchase_orders ALTER COLUMN status SET DEFAULT 'DRAFT';
+          END IF;
+      END $$;
+    `);
     for (const index of [
       `CREATE INDEX IF NOT EXISTS idx_purchase_orders_supplier ON purchase_orders (supplier_id);`,
       `CREATE INDEX IF NOT EXISTS idx_purchase_orders_project ON purchase_orders (project_id);`,
@@ -1726,7 +2057,7 @@ export const initDatabase = async () => {
   vat_amount              NUMERIC(14,2) NOT NULL,
   amount_incl_vat         NUMERIC(14,2) NOT NULL,
   vat_code                VARCHAR(20),
-  status                  VARCHAR(10) NOT NULL DEFAULT 'RECEIVED' CHECK (status IN ('RECEIVED', 'APPROVED', 'PAID', 'VOID')),
+  status                  "SupplierInvoiceStatus" NOT NULL DEFAULT 'RECEIVED',
   description             TEXT,
   internal_notes          TEXT,
   file_data               BYTEA,
@@ -1745,6 +2076,23 @@ export const initDatabase = async () => {
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT supplier_invoices_amounts_check CHECK (amount_incl_vat = amount_excl_vat + vat_amount)
 );`);
+    // A database made before the enum has status as VARCHAR(10) + a CHECK: turn it into the enum once (rows keep
+    // their value). The unique number index has `WHERE status <> 'VOID'`, so it is dropped first and made again
+    // just below. A no-op once the column is the enum.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'supplier_invoices' AND column_name = 'status'
+                       AND data_type = 'character varying') THEN
+              DROP INDEX IF EXISTS uq_supplier_invoices_number;
+              ALTER TABLE supplier_invoices DROP CONSTRAINT IF EXISTS supplier_invoices_status_check;
+              ALTER TABLE supplier_invoices ALTER COLUMN status DROP DEFAULT;
+              ALTER TABLE supplier_invoices ALTER COLUMN status TYPE "SupplierInvoiceStatus" USING status::"SupplierInvoiceStatus";
+              ALTER TABLE supplier_invoices ALTER COLUMN status SET DEFAULT 'RECEIVED';
+          END IF;
+      END $$;
+    `);
     // The same supplier cannot send the same number twice (a voided entry frees its number)
     await client.query(
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_invoices_number ON supplier_invoices (supplier_id, LOWER(invoice_number)) WHERE status <> 'VOID';`,
@@ -1764,7 +2112,7 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS subcontract_assignments (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   number                  VARCHAR(30) UNIQUE,
-  status                  VARCHAR(10) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'SENT', 'CONFIRMED', 'DECLINED', 'COMPLETED', 'INVOICED', 'CANCELLED')),
+  status                  "SubcontractAssignmentStatus" NOT NULL DEFAULT 'DRAFT',
   project_id              UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
   subcontractor_id        UUID NOT NULL REFERENCES relations(id) ON DELETE RESTRICT,
   title                   VARCHAR(255) NOT NULL,
@@ -1788,7 +2136,7 @@ export const initDatabase = async () => {
   sent_to                 VARCHAR(255),
   pdf_data                BYTEA,
   responded_at            TIMESTAMPTZ,
-  response_via            VARCHAR(10),
+  response_via            "SubcontractResponseVia",
   response_comment        TEXT,
   proposed_start          DATE,
   proposed_end            DATE,
@@ -1803,6 +2151,32 @@ export const initDatabase = async () => {
   updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT subcontract_planned_dates_check CHECK (planned_end IS NULL OR planned_start IS NULL OR planned_end >= planned_start)
 );`);
+    // A database made before the enums has status as VARCHAR(10) + a CHECK and response_via as a plain VARCHAR(10):
+    // turn both into the enums once (rows keep their value; a response_via that is not one of the known channels,
+    // which the API never wrote, becomes OTHER instead of stopping the start-up). A no-op once they are enums.
+    await client.query(`
+      DO $$
+      BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'subcontract_assignments' AND column_name = 'status'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE subcontract_assignments DROP CONSTRAINT IF EXISTS subcontract_assignments_status_check;
+              ALTER TABLE subcontract_assignments ALTER COLUMN status DROP DEFAULT;
+              ALTER TABLE subcontract_assignments ALTER COLUMN status TYPE "SubcontractAssignmentStatus" USING status::"SubcontractAssignmentStatus";
+              ALTER TABLE subcontract_assignments ALTER COLUMN status SET DEFAULT 'DRAFT';
+          END IF;
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema = 'public' AND table_name = 'subcontract_assignments' AND column_name = 'response_via'
+                       AND data_type = 'character varying') THEN
+              ALTER TABLE subcontract_assignments ALTER COLUMN response_via TYPE "SubcontractResponseVia" USING (
+                CASE
+                  WHEN response_via IS NULL OR btrim(response_via) = '' THEN NULL
+                  WHEN upper(btrim(response_via)) IN ('PHONE', 'EMAIL', 'IN_PERSON', 'OTHER', 'PORTAL') THEN upper(btrim(response_via))::"SubcontractResponseVia"
+                  ELSE 'OTHER'::"SubcontractResponseVia"
+                END);
+          END IF;
+      END $$;
+    `);
     for (const index of [
       `CREATE INDEX IF NOT EXISTS idx_subcontract_project ON subcontract_assignments (project_id);`,
       `CREATE INDEX IF NOT EXISTS idx_subcontract_subcontractor ON subcontract_assignments (subcontractor_id);`,
@@ -1851,10 +2225,10 @@ export const initDatabase = async () => {
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   title                   VARCHAR(255) NOT NULL,
   description             TEXT,
-  status                  VARCHAR(10) NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'DONE')),
+  status                  "ActionStatus" NOT NULL DEFAULT 'OPEN',
   due_date                DATE,
   assignee_id             UUID REFERENCES users(id) ON DELETE SET NULL,
-  source                  VARCHAR(10) NOT NULL DEFAULT 'MANUAL' CHECK (source IN ('MANUAL', 'AUTOMATIC')),
+  source                  "ActionSource" NOT NULL DEFAULT 'MANUAL',
   auto_type               VARCHAR(40),
   auto_key                VARCHAR(120),
   entity_type             VARCHAR(30),
@@ -1868,6 +2242,20 @@ export const initDatabase = async () => {
   CONSTRAINT actions_entity_pair_check CHECK ((entity_type IS NULL) = (entity_id IS NULL)),
   CONSTRAINT actions_auto_check CHECK ((source = 'AUTOMATIC') = (auto_type IS NOT NULL))
 );`);
+    // A database made before the enums has status and source as VARCHAR(10) + a CHECK each: turn both into the enums
+    // once. The check that reads `source` is dropped first and made again against the enum.
+    await convertColumnsToEnums(
+      client,
+      "actions",
+      [
+        { column: "status", type: "ActionStatus", default: "OPEN" },
+        { column: "source", type: "ActionSource", default: "MANUAL" },
+      ],
+      {
+        dropConstraints: ["actions_auto_check"],
+        afterSql: [`ALTER TABLE actions ADD CONSTRAINT actions_auto_check CHECK ((source = 'AUTOMATIC') = (auto_type IS NOT NULL))`],
+      },
+    );
     for (const index of [
       `CREATE UNIQUE INDEX IF NOT EXISTS uq_actions_auto_key ON actions (auto_key) WHERE auto_key IS NOT NULL;`,
       `CREATE INDEX IF NOT EXISTS idx_actions_assignee_status ON actions (assignee_id, status, due_date);`,
@@ -2012,7 +2400,7 @@ export const initDatabase = async () => {
     await client.query(`CREATE TABLE IF NOT EXISTS chat_channels (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id              UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  kind                    VARCHAR(13) NOT NULL CHECK (kind IN ('CUSTOMER', 'INTERNAL', 'SUBCONTRACTOR')),
+  kind                    "ChatChannelKind" NOT NULL,
   relation_id             UUID REFERENCES relations(id) ON DELETE CASCADE,
   created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT chat_channels_relation_check CHECK ((kind = 'SUBCONTRACTOR') = (relation_id IS NOT NULL))
@@ -2055,10 +2443,37 @@ export const initDatabase = async () => {
     await client.query(`ALTER TABLE project_files ADD COLUMN IF NOT EXISTS chat_message_id UUID REFERENCES chat_messages(id) ON DELETE CASCADE;`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_project_files_chat ON project_files (chat_message_id) WHERE chat_message_id IS NOT NULL;`);
 
+    // -- Staff chat: DIRECT (two employees) and GROUP (named, several employees) conversations. They belong to no
+    // -- project, and only the people in `chat_members` can see them (not even the Beheerder).
+    await client.query(`ALTER TABLE chat_channels ALTER COLUMN project_id DROP NOT NULL;`);
+    // A database made before the enum has kind as VARCHAR(13) + a CHECK (with 3 or 5 kinds): turn it into the enum
+    // once. The two checks that read `kind` are dropped first and made again against the enum (the project check
+    // is made just below). A no-op once the column is the enum.
+    await convertColumnsToEnums(client, "chat_channels", [{ column: "kind", type: "ChatChannelKind" }], {
+      dropConstraints: ["chat_channels_relation_check", "chat_channels_project_check"],
+      afterSql: [
+        `ALTER TABLE chat_channels ADD CONSTRAINT chat_channels_relation_check CHECK ((kind = 'SUBCONTRACTOR') = (relation_id IS NOT NULL))`,
+      ],
+    });
+    await client.query(`ALTER TABLE chat_channels ADD COLUMN IF NOT EXISTS title VARCHAR(120);`);
+    await client.query(`ALTER TABLE chat_channels ADD COLUMN IF NOT EXISTS created_by UUID REFERENCES users(id) ON DELETE SET NULL;`);
+    await client.query(`ALTER TABLE chat_channels ADD COLUMN IF NOT EXISTS direct_key VARCHAR(80);`);
+    await client.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_channels_project_check') THEN
+          ALTER TABLE chat_channels ADD CONSTRAINT chat_channels_project_check
+            CHECK ((kind IN ('DIRECT', 'GROUP')) = (project_id IS NULL));
+        END IF;
+      END $$;
+    `);
+    // One DIRECT chat per pair of people (the two ids sorted and joined)
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_direct_key ON chat_channels (direct_key) WHERE direct_key IS NOT NULL;`);
+    await client.query(`ALTER TABLE chat_members ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false;`);
+
     // Every project gets its customer and internal channels
     await client.query(`
       INSERT INTO chat_channels (project_id, kind)
-      SELECT p.id, k.kind FROM projects p CROSS JOIN (VALUES ('CUSTOMER'), ('INTERNAL')) AS k(kind)
+      SELECT p.id, k.kind FROM projects p CROSS JOIN (VALUES ('CUSTOMER'::"ChatChannelKind"), ('INTERNAL'::"ChatChannelKind")) AS k(kind)
       ON CONFLICT DO NOTHING;
     `);
     // Copy the old customer <-> office messages and subcontractor <-> office messages once. They count as
@@ -2081,7 +2496,7 @@ export const initDatabase = async () => {
     `);
     await client.query(`
       INSERT INTO chat_channels (project_id, kind, relation_id)
-      SELECT DISTINCT sa.project_id, 'SUBCONTRACTOR', am.relation_id
+      SELECT DISTINCT sa.project_id, 'SUBCONTRACTOR'::"ChatChannelKind", am.relation_id
       FROM assignment_messages am JOIN subcontract_assignments sa ON sa.id = am.assignment_id
       ON CONFLICT DO NOTHING;
     `);
@@ -2135,11 +2550,65 @@ export const initDatabase = async () => {
       await client.query(index);
     }
 
+    // A chat copied from the old direct messages is as old as its first message (not as old as the copy), so the chat
+    // list, which puts the newest activity first, does not treat every old conversation as brand new
+    await client.query(`
+      UPDATE chat_channels c SET created_at = f.first_at
+      FROM (SELECT m.channel_id, MIN(m.created_at) AS first_at FROM chat_messages m
+            WHERE m.legacy_ref LIKE 'dm:%' GROUP BY m.channel_id) f
+      WHERE c.id = f.channel_id AND c.kind = 'DIRECT' AND c.created_at > f.first_at;
+    `);
+    // The old direct messages (inbox / sent) move into DIRECT chats once. Safe to repeat: a message that was copied
+    // has its `legacy_ref` ('dm:<id>'), and nothing is done when there is nothing left to copy.
+    const pendingDirect = await client.query(`
+      SELECT 1 FROM messages m
+      WHERE m.kind = 'DIRECT' AND m.author_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.legacy_ref = 'dm:' || m.id)
+      LIMIT 1;
+    `);
+    if (pendingDirect.rows.length > 0) {
+      const pairKey = `LEAST(m.author_id::text, m.recipient_id::text) || ':' || GREATEST(m.author_id::text, m.recipient_id::text)`;
+      await client.query(`
+        INSERT INTO chat_channels (kind, direct_key, created_at)
+        SELECT 'DIRECT'::"ChatChannelKind", ${pairKey}, MIN(m.created_at) FROM messages m WHERE m.kind = 'DIRECT' AND m.author_id IS NOT NULL
+        GROUP BY ${pairKey}
+        ON CONFLICT DO NOTHING;
+      `);
+      await client.query(`
+        INSERT INTO chat_members (channel_id, user_id)
+        SELECT DISTINCT c.id, x.user_id::uuid
+        FROM messages m
+        JOIN chat_channels c ON c.direct_key = ${pairKey}
+        CROSS JOIN LATERAL (VALUES (m.author_id), (m.recipient_id)) AS x(user_id)
+        WHERE m.kind = 'DIRECT' AND m.author_id IS NOT NULL
+        ON CONFLICT DO NOTHING;
+      `);
+      await client.query(`
+        INSERT INTO chat_messages (channel_id, author_id, body, created_at, edited_at, deleted_at, legacy_ref)
+        SELECT c.id, m.author_id,
+               CASE WHEN COALESCE(btrim(m.subject), '') <> '' THEN m.subject || E'\n\n' || m.body ELSE m.body END,
+               m.created_at, m.edited_at, m.deleted_at, 'dm:' || m.id
+        FROM messages m JOIN chat_channels c ON c.direct_key = ${pairKey}
+        WHERE m.kind = 'DIRECT' AND m.author_id IS NOT NULL
+        ON CONFLICT (legacy_ref) DO NOTHING;
+      `);
+      // Read up to just before the first message the person had not opened (everything, when they opened all)
+      await client.query(`
+        INSERT INTO chat_reads (channel_id, user_id, last_read_at)
+        SELECT c.id, m.recipient_id,
+               COALESCE(MIN(m.created_at) FILTER (WHERE m.read_at IS NULL AND m.deleted_at IS NULL) - interval '1 microsecond', MAX(m.created_at))
+        FROM messages m JOIN chat_channels c ON c.direct_key = ${pairKey}
+        WHERE m.kind = 'DIRECT' AND m.author_id IS NOT NULL
+        GROUP BY c.id, m.recipient_id
+        ON CONFLICT (channel_id, user_id) DO NOTHING;
+      `);
+    }
+
     // -- Notifications (FR-MSG-05): the in-app list, and what each user wants (in the app / by email)
     await client.query(`CREATE TABLE IF NOT EXISTS notifications (
   id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id                 UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  type                    VARCHAR(30) NOT NULL,
+  type                    "NotificationType" NOT NULL,
   title                   VARCHAR(255) NOT NULL,
   body                    TEXT,
   entity_type             VARCHAR(30),
@@ -2157,6 +2626,21 @@ export const initDatabase = async () => {
   email                   BOOLEAN NOT NULL DEFAULT false,
   PRIMARY KEY (user_id, type)
 );`);
+    // A database made before the enum has type as VARCHAR(30): turn it into the enum once. A row whose type is not a
+    // known kind (the code never wrote one) becomes OTHER and keeps its old name in data, so nothing is lost and the
+    // start-up is never stopped by it. A no-op once the column is the enum.
+    const notificationsAreText = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'notifications'
+         AND column_name = 'type' AND data_type = 'character varying'`,
+    );
+    if (notificationsAreText.rows.length > 0) {
+      await client.query(
+        `UPDATE notifications
+         SET data = COALESCE(data, '{}'::jsonb) || jsonb_build_object('original_type', type), type = 'OTHER'
+         WHERE type NOT IN (${notificationValues})`,
+      );
+      await client.query(`ALTER TABLE notifications ALTER COLUMN type TYPE "NotificationType" USING type::"NotificationType"`);
+    }
     for (const index of [
       `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications (user_id, created_at DESC);`,
       `CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (user_id, created_at DESC) WHERE read_at IS NULL;`,
