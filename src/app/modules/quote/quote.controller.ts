@@ -108,7 +108,11 @@ const deleteQuote = catchAsync(async (req: Request, res: Response) => {
 const sendQuote = catchAsync(async (req: Request, res: Response) => {
   const result = await QuoteService.sendQuote(
     req.params.id as string,
-    { email: req.body.email, send_email: req.body.send_email, invite_to_portal: req.body.invite_to_portal },
+    {
+      email: req.body.email,
+      send_email: req.body.send_email,
+      invite_to_portal: req.body.invite_to_portal,
+    },
     req.user.id,
   );
 
