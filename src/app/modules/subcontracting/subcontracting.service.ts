@@ -216,7 +216,7 @@ const getAllAssignments = async (params: Record<string, any>) => {
     if (statuses.some((x) => !(assignmentStatuses as readonly string[]).includes(x))) {
       throw new ApiError(httpStatus.BAD_REQUEST, "Status should be DRAFT, SENT, CONFIRMED, DECLINED, COMPLETED, INVOICED or CANCELLED!");
     }
-    conditions.push(`sa.status = ANY($${n++}::text[])`);
+    conditions.push(`sa.status = ANY($${n++}::"SubcontractAssignmentStatus"[])`);
     values.push(statuses);
   }
   for (const [param, column, label] of [

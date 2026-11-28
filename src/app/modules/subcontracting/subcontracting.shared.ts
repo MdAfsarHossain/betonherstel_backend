@@ -3,6 +3,7 @@ import ApiError from "../../errors/ApiError";
 import assertUuid from "../../utils/assertUuid";
 import { logAudit } from "../../utils/audit";
 import { RelationService } from "../relation/relation.service";
+import { TRelationEventType } from "../relation/relation.interface";
 
 // Pieces shared by the subcontracting service and the supplier invoice service.
 
@@ -32,7 +33,7 @@ export const logAssignmentEvent = (
   client: any,
   subcontractorId: string,
   assignmentId: string,
-  eventType: string,
+  eventType: TRelationEventType,
   title: string,
   actorId: string | null,
   extra: { description?: string | null; metadata?: Record<string, any> } = {},
